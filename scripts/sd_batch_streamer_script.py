@@ -2,22 +2,23 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.2.2
+# Version: v0.2.3
 #
 # Changelog:
-# v0.2.2: Bug fix. Corrected import to use 'modules.sd_samplers' as suggested by the error log.
-# v0.2.1: Bug fix. Attempted to correct sampler loading (introduced new bug).
+# v0.2.3: Bug fix. Replaced deprecated .style() method with direct constructor arguments for gr.Gallery to support newer Gradio versions.
+# v0.2.2: Bug fix. Corrected import to use 'modules.sd_samplers'.
+# v0.2.1: Bug fix. Attempted to correct sampler loading.
 # v0.2.0: Major revamp. Converted the extension into a standalone top-level UI tab.
 # v0.1.0: Initial release as a script within the txt2img tab.
 #
 
 import gradio as gr
-from modules import shared, processing, sd_samplers # --- FIX: Import 'sd_samplers' directly ---
+from modules import shared, processing, sd_samplers
 from modules.script_callbacks import on_ui_tabs
 from modules.ui_components import ToolButton
 
 # --- Version Information ---
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 def create_streamer_ui():
     """
@@ -108,15 +109,21 @@ def create_streamer_ui():
                     width = gr.Slider(minimum=64, maximum=2048, step=64, label="Width", value=512)
                     height = gr.Slider(minimum=64, maximum=2048, step=64, label="Height", value=512)
                 
-                # --- FIX: Get sampler choices from the imported sd_samplers object ---
                 sampler_choices = [s.name for s in sd_samplers.all_samplers]
                 sampler = gr.Dropdown(label='Sampling method', choices=sampler_choices, value='Euler a')
 
             with gr.Column(scale=3):
                 gr.HTML("<h4>Live Output</h4>")
+                # --- FIX: Moved style arguments directly into the Gallery constructor ---
                 output_gallery = gr.Gallery(
-                    label="Live Output", show_label=False, elem_id="sd_batch_stream_gallery"
-                ).style(columns=[4], rows=[2], object_fit="contain", height="auto")
+                    label="Live Output",
+                    show_label=False,
+                    elem_id="sd_batch_stream_gallery",
+                    columns=4,
+                    rows=2,
+                    object_fit="contain",
+                    height="auto"
+                )
 
         # --- Event Handlers ---
         stream_button.click(
