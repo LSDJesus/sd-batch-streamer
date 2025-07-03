@@ -2,20 +2,21 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.2.0
+# Version: v0.2.1
 #
 # Changelog:
-# v0.2.0: Major revamp. Converted the extension into a standalone top-level UI tab with its own controls.
+# v0.2.1: Bug fix. Correctly load samplers from modules.samplers instead of modules.shared.
+# v0.2.0: Major revamp. Converted the extension into a standalone top-level UI tab.
 # v0.1.0: Initial release as a script within the txt2img tab.
 #
 
 import gradio as gr
-from modules import shared, processing
+from modules import shared, processing, samplers # --- FIX: Import 'samplers' module ---
 from modules.script_callbacks import on_ui_tabs
 from modules.ui_components import ToolButton
 
 # --- Version Information ---
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 def create_streamer_ui():
     """
@@ -24,7 +25,7 @@ def create_streamer_ui():
     """
     with gr.Blocks() as streamer_tab:
         # The main processing logic function
-        def process_and_stream_images(prompts_text, negative_prompt, steps_val, cfg_val, width, height, sampler):
+        def process_and_stream_images(prompts_text, negative_prompt, steps_val, cfg_val, width, height, sampler_name):
             yield {output_gallery: gr.Gallery.update(value=[], visible=True)}
             
             prompts = [p.strip() for p in prompts_text.splitlines() if p.strip()]
@@ -42,7 +43,7 @@ def create_streamer_ui():
             shared.state.job_count = len(prompts)
 
             for i, prompt in enumerate(prompts):
-                shared.state.job = f"Prompt: {prompt[:80]}..." # Show current prompt in UI
+                shared.state.job = f"Prompt: {prompt[:80]}..."
                 shared.state.job_no = i + 1
                 if shared.state.interrupted:
                     break
@@ -55,7 +56,7 @@ def create_streamer_ui():
                     negative_prompt=negative_prompt,
                     steps=int(steps_val),
                     cfg_scale=float(cfg_val),
-                    sampler_name=sampler,
+                    sampler_name=sampler_name,
                     seed=-1,
                     width=int(width),
                     height=int(height),
@@ -80,7 +81,6 @@ def create_streamer_ui():
         # --- UI Layout ---
         with gr.Row():
             with gr.Column(scale=2):
-                # Display the version number in the UI
                 gr.HTML(f"<h3>SD Batch Streamer <span style='font-size:0.8rem;color:grey;'>v{__version__}</span></h3>")
                 
                 prompts_input = gr.Textbox(
@@ -107,8 +107,8 @@ def create_streamer_ui():
                     width = gr.Slider(minimum=64, maximum=2048, step=64, label="Width", value=512)
                     height = gr.Slider(minimum=64, maximum=2048, step=64, label="Height", value=512)
                 
-                # Get the list of available samplers dynamically
-                sampler_choices = [s.name for s in shared.sd_samplers.all_samplers if s.name != 'PLMS']
+                # --- FIX: Get sampler choices from the correct module ---
+                sampler_choices = [s.name for s in samplers.all_samplers]
                 sampler = gr.Dropdown(label='Sampling method', choices=sampler_choices, value='Euler a')
 
             with gr.Column(scale=3):
