@@ -2,9 +2,10 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.3.0
+# Version: v0.3.1
 #
 # Changelog:
+# v0.3.1: Bug fix. Explicitly set do_not_save_samples=True to prevent TypeError on image save.
 # v0.3.0: Feature. Added "Send to inputs" functionality. Click an image in the gallery to load its settings.
 # v0.2.3: Bug fix. Replaced deprecated .style() method for gr.Gallery.
 # v0.2.2: Bug fix. Corrected import to use 'modules.sd_samplers'.
@@ -14,16 +15,13 @@
 #
 
 import gradio as gr
-import json
 from modules import shared, processing, sd_samplers
 from modules.script_callbacks import on_ui_tabs
 
 # --- Version Information ---
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # --- Globals for this script ---
-# We need a place to store the parameters for each generated image.
-# A simple dictionary mapping index to parameters will work.
 image_params_storage = {}
 
 def create_streamer_ui():
@@ -32,9 +30,7 @@ def create_streamer_ui():
     """
     with gr.Blocks() as streamer_tab:
         
-        # The main processing logic function
         def process_and_stream_images(prompts_text, negative_prompt, steps_val, cfg_val, width, height, sampler_name):
-            # Clear storage at the start of a new batch
             global image_params_storage
             image_params_storage.clear()
 
@@ -69,11 +65,13 @@ def create_streamer_ui():
                     steps=int(steps_val),
                     cfg_scale=float(cfg_val),
                     sampler_name=sampler_name,
-                    seed=-1, # We will get the real seed after processing
+                    seed=-1,
                     width=int(width),
                     height=int(height),
                     n_iter=1,
                     batch_size=1,
+                    # --- FIX: Tell the pipeline to NOT save images to disk ---
+                    do_not_save_samples=True,
                 )
 
                 processed = processing.process_images(p)
@@ -82,9 +80,6 @@ def create_streamer_ui():
                     new_image = processed.images[0]
                     all_images.append(new_image)
                     
-                    # --- NEW: Store parameters for the generated image ---
-                    # We use the current image index 'i' as the key.
-                    # We retrieve the actual seed used from the processed object.
                     image_params_storage[i] = {
                         "prompt": prompt,
                         "negative_prompt": negative_prompt,
@@ -105,17 +100,13 @@ def create_streamer_ui():
                 stream_button: gr.Button.update(value="Generate and Stream", interactive=True)
             }
 
-        # --- NEW: Function to handle gallery clicks ---
-        def on_gallery_select(evt: gr.SelectData, prompts_text, neg_prompt_text):
-            # evt.index is the index of the clicked image in the gallery
+        def on_gallery_select(evt: gr.SelectData):
             params = image_params_storage.get(evt.index)
             
             if params:
-                # To avoid replacing the whole prompt list, we can prepend the selected prompt.
-                # A more user-friendly approach might be to just replace the first line.
+                # Prepend the selected prompt to the prompt list for easy re-use.
                 updated_prompts = f"{params['prompt']}\n"
                 
-                # We return a dictionary mapping components to their new values.
                 return {
                     prompts_input: updated_prompts,
                     negative_prompt: params["negative_prompt"],
@@ -125,12 +116,8 @@ def create_streamer_ui():
                     height: params["height"],
                     sampler: params["sampler_name"]
                 }
-            
-            # If no params found, return original values
-            return {
-                prompts_input: prompts_text,
-                negative_prompt: neg_prompt_text,
-            }
+            # Fallback in case params are not found (should not happen)
+            return {}
 
         # --- UI Layout ---
         with gr.Row():
@@ -174,11 +161,10 @@ def create_streamer_ui():
         interrupt_button.click(fn=lambda: shared.state.interrupt(), inputs=None, outputs=None)
         skip_button.click(fn=lambda: shared.state.skip(), inputs=None, outputs=None)
         
-        # --- NEW: Connect the gallery's select event to our handler function ---
         gallery_outputs = [prompts_input, negative_prompt, steps, cfg_scale, width, height, sampler]
         output_gallery.select(
             fn=on_gallery_select,
-            inputs=[prompts_input, negative_prompt],
+            inputs=[], # Inputs are derived from the event data, no need to pass them here
             outputs=gallery_outputs
         )
 
