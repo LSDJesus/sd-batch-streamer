@@ -2,21 +2,22 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.2.1
+# Version: v0.2.2
 #
 # Changelog:
-# v0.2.1: Bug fix. Correctly load samplers from modules.samplers instead of modules.shared.
+# v0.2.2: Bug fix. Corrected import to use 'modules.sd_samplers' as suggested by the error log.
+# v0.2.1: Bug fix. Attempted to correct sampler loading (introduced new bug).
 # v0.2.0: Major revamp. Converted the extension into a standalone top-level UI tab.
 # v0.1.0: Initial release as a script within the txt2img tab.
 #
 
 import gradio as gr
-from modules import shared, processing, samplers # --- FIX: Import 'samplers' module ---
+from modules import shared, processing, sd_samplers # --- FIX: Import 'sd_samplers' directly ---
 from modules.script_callbacks import on_ui_tabs
 from modules.ui_components import ToolButton
 
 # --- Version Information ---
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 def create_streamer_ui():
     """
@@ -107,8 +108,8 @@ def create_streamer_ui():
                     width = gr.Slider(minimum=64, maximum=2048, step=64, label="Width", value=512)
                     height = gr.Slider(minimum=64, maximum=2048, step=64, label="Height", value=512)
                 
-                # --- FIX: Get sampler choices from the correct module ---
-                sampler_choices = [s.name for s in samplers.all_samplers]
+                # --- FIX: Get sampler choices from the imported sd_samplers object ---
+                sampler_choices = [s.name for s in sd_samplers.all_samplers]
                 sampler = gr.Dropdown(label='Sampling method', choices=sampler_choices, value='Euler a')
 
             with gr.Column(scale=3):
