@@ -2,14 +2,14 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.5.6
+# Version: v0.5.8
 #
 # Changelog:
-# v0.5.6: Compatibility Fix. Removed reference to `shared.sd_vae` which is not
-#         present in all environments (e.g., Forge), resolving an AttributeError.
+# v0.5.8: Final Stability Fix. Correctly implemented the dictionary-based output model for
+#         all event handlers, resolving the "didn't receive enough output values" ValueError.
+# v0.5.7: (Failed Attempt) Incorrectly configured event handlers.
+# v0.5.6: Compatibility Fix. Removed reference to `shared.sd_vae`.
 # v0.5.5: Critical Bug Fix. Corrected Python scope error.
-# v0.5.4: Stability and Performance Update.
-# v0.5.3: Critical Bug Fix. Resolved UI loading deadlock.
 #
 
 import gradio as gr
@@ -20,7 +20,7 @@ from modules import shared, processing, sd_samplers, sd_schedulers
 from modules.script_callbacks import on_ui_tabs
 
 # --- Version Information ---
-__version__ = "0.5.6"
+__version__ = "0.5.8"
 
 # --- Globals to store data between button clicks ---
 last_run_images = []
@@ -51,18 +51,17 @@ def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
 # --- Main Logic Functions ---
 
 def run_xyz_matrix(
-    ui_components, # A tuple of the UI components we need to update
+    components, # A dictionary of the UI components we need to update
     p_prompt, n_prompt, sampler, scheduler, steps, cfg, width, height, seed,
     x_values_str, y_values_str, z_values_str
 ):
-    (html_log, generate_button, assemble_button, individual_gallery) = ui_components
     global last_run_images, last_run_labels
     last_run_images, last_run_labels = [], {}
 
     yield {
-        html_log: "Parsing inputs...",
-        generate_button: gr.Button.update(interactive=False),
-        assemble_button: gr.Button.update(visible=False)
+        components['log']: "Parsing inputs...",
+        components['gen_btn']: gr.Button.update(interactive=False),
+        components['asm_btn']: gr.Button.update(visible=False)
     }
     
     x_vals = [x.strip() for x in x_values_str.split('|') if x.strip()]
@@ -70,50 +69,43 @@ def run_xyz_matrix(
     z_vals = [z.strip() for z in z_values_str.split('|') if z.strip()]
     total_images = len(x_vals) * len(y_vals) * len(z_vals)
     if total_images == 0:
-        yield { html_log: "Error: No jobs to run.", generate_button: gr.Button.update(interactive=True) }; return
+        yield { components['log']: "Error: No jobs to run.", components['gen_btn']: gr.Button.update(interactive=True) }; return
     
     job_list = list(itertools.product(z_vals, y_vals, x_vals))
     all_images = []
     
-    yield {
-        html_log: f"Starting generation of {total_images} images...",
-        individual_gallery: None,
-    }
+    yield { components['log']: f"Starting generation of {total_images} images...", components['ind_gallery']: None }
     shared.state.begin(); shared.state.job_count = total_images
     for i, (z_val, y_val, x_val) in enumerate(job_list):
         if shared.state.interrupted: break
         shared.state.job = f"Image {i+1}/{total_images}"
-        
         p = processing.StableDiffusionProcessingTxt2Img(
-            sd_model=shared.sd_model,
-            # --- FIX: Removed sd_vae=shared.sd_vae ---
-            prompt=p_prompt.replace("{subject}", x_val), negative_prompt=n_prompt,
+            sd_model=shared.sd_model, prompt=p_prompt.replace("{subject}", x_val), negative_prompt=n_prompt,
             steps=int(steps), cfg_scale=float(y_val), sampler_name=z_val, scheduler=scheduler,
             width=int(width), height=int(height), seed=int(seed) + i, n_iter=1, batch_size=1, do_not_save_samples=True,
         )
         proc = processing.process_images(p)
         if proc.images:
             all_images.append(proc.images[0])
-            yield { individual_gallery: all_images, html_log: f"Generated image {i+1}/{total_images}" }
+            yield { components['ind_gallery']: all_images, components['log']: f"Generated image {i+1}/{total_images}" }
     shared.state.end()
 
     last_run_images = all_images
     last_run_labels = {'x': x_vals, 'y': y_vals, 'z': z_vals}
     
     yield {
-        html_log: f"Generation of {len(all_images)} images complete. Ready to assemble grids.",
-        generate_button: gr.Button.update(interactive=True),
-        assemble_button: gr.Button.update(visible=True)
+        components['log']: f"Generation of {len(all_images)} images complete. Ready to assemble grids.",
+        components['gen_btn']: gr.Button.update(interactive=True),
+        components['asm_btn']: gr.Button.update(visible=True)
     }
 
-def assemble_grids_from_last_run(html_log, grid_gallery, mega_grid_image):
+def assemble_grids_from_last_run(components):
     if not last_run_images or not last_run_labels:
-        yield { html_log: "No images from a previous run found to assemble." }
-        return
+        yield { components['log']: "No images from a previous run found to assemble." }; return
 
     x_vals, y_vals, z_vals = last_run_labels['x'], last_run_labels['y'], last_run_labels['z']
     
-    yield { html_log: "Assembling X/Y grids..." }
+    yield { components['log']: "Assembling X/Y grids..." }
     grid_images = []
     images_per_grid = len(x_vals) * len(y_vals)
     for i, z_label in enumerate(z_vals):
@@ -122,14 +114,14 @@ def assemble_grids_from_last_run(html_log, grid_gallery, mega_grid_image):
         if grid: grid_images.append(grid)
     
     if len(grid_images) > 1:
-        yield { grid_gallery: grid_images, html_log: "Assembling Mega-Grid..." }
+        yield { components['grid_gallery']: grid_images, components['log']: "Assembling Mega-Grid..." }
         grid_w, grid_h = grid_images[0].size
         mega_grid = Image.new('RGB', (grid_w * len(grid_images), grid_h), 'white')
         for i, grid_img in enumerate(grid_images):
             mega_grid.paste(grid_img, (i * grid_w, 0))
-        yield { mega_grid_image: mega_grid, html_log: "All grids assembled." }
+        yield { components['mega_grid']: mega_grid, components['log']: "All grids assembled." }
     else:
-        yield { grid_gallery: None, mega_grid_image: grid_images[0] if grid_images else None, html_log: "Grid assembled." }
+        yield { components['grid_gallery']: None, components['mega_grid']: grid_images[0] if grid_images else None, components['log']: "Grid assembled." }
 
 
 def create_streamer_ui():
@@ -166,20 +158,27 @@ def create_streamer_ui():
             with gr.TabItem("Mega-Grid"):
                 mega_grid_image = gr.Image(label="Final Mega-Grid", show_label=False)
 
-        # --- Event Handlers ---
+        # --- Event Handlers (FIXED) ---
         
-        ui_components_to_update = (html_log, generate_button, assemble_button, individual_gallery)
-        fn_with_components = functools.partial(run_xyz_matrix, ui_components_to_update)
-        
+        # A dictionary to pass component objects to the handler functions
+        gen_components = {
+            'log': html_log, 'gen_btn': generate_button, 'asm_btn': assemble_button,
+            'ind_gallery': individual_gallery
+        }
         gen_inputs = [
             positive_prompt, negative_prompt, sampler_dropdown, scheduler_dropdown, steps_slider, cfg_slider, width_slider, height_slider, seed_input,
             x_input, y_input, z_input
         ]
-        
+        # Create a function call that includes the components dictionary as the first argument
+        fn_with_components = functools.partial(run_xyz_matrix, gen_components)
+        # The outputs parameter MUST be None when the function yields dictionaries
         generate_button.click(fn=fn_with_components, inputs=gen_inputs, outputs=None)
         
-        asm_ui_components_to_update = (html_log, grid_gallery, mega_grid_image)
-        asm_fn_with_components = functools.partial(assemble_grids_from_last_run, *asm_ui_components_to_update)
+        # Do the same for the assemble button
+        asm_components = {
+            'log': html_log, 'grid_gallery': grid_gallery, 'mega_grid': mega_grid_image
+        }
+        asm_fn_with_components = functools.partial(assemble_grids_from_last_run, asm_components)
         assemble_button.click(fn=asm_fn_with_components, inputs=None, outputs=None)
 
     return streamer_tab
