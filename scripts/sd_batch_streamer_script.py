@@ -2,23 +2,24 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.5.4
+# Version: v0.5.5
 #
 # Changelog:
-# v0.5.4: Stability and Performance Update.
-#         - Fixed significant pause between images by explicitly setting the VAE.
-#         - Decoupled grid assembly into a separate button to prevent memory-related crashes.
+# v0.5.5: Critical Bug Fix. Corrected Python scope error by passing UI components
+#         into the processing function, resolving the NameError crash.
+# v0.5.4: Stability and Performance Update. Decoupled grid assembly, added VAE caching.
 # v0.5.3: Critical Bug Fix. Resolved UI loading deadlock.
 #
 
 import gradio as gr
 import itertools
+import functools
 from PIL import Image, ImageDraw, ImageFont
 from modules import shared, processing, sd_samplers, sd_schedulers
 from modules.script_callbacks import on_ui_tabs
 
 # --- Version Information ---
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 # --- Globals to store data between button clicks ---
 last_run_images = []
@@ -26,7 +27,6 @@ last_run_labels = {}
 
 # --- Helper Functions ---
 def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
-    # ... (This function remains unchanged)
     if not all([images, x_labels, y_labels]): return None
     grid_cols, grid_rows = len(x_labels), len(y_labels)
     if len(images) != grid_cols * grid_rows: return None
@@ -50,13 +50,21 @@ def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
 # --- Main Logic Functions ---
 
 def run_xyz_matrix(
+    # These are the UI components we need to update, passed in as arguments
+    html_log, generate_button, assemble_button, individual_gallery,
+    # These are the values from the input controls
     p_prompt, n_prompt, sampler, scheduler, steps, cfg, width, height, seed,
     x_values_str, y_values_str, z_values_str
 ):
     global last_run_images, last_run_labels
     last_run_images, last_run_labels = [], {}
 
-    yield { html_log: "Parsing inputs...", generate_button: gr.Button.update(interactive=False), assemble_button: gr.Button.update(visible=False) }
+    yield {
+        html_log: "Parsing inputs...",
+        generate_button: gr.Button.update(interactive=False),
+        assemble_button: gr.Button.update(visible=False)
+    }
+    
     x_vals = [x.strip() for x in x_values_str.split('|') if x.strip()]
     y_vals = [y.strip() for y in y_values_str.split('|') if y.strip()]
     z_vals = [z.strip() for z in z_values_str.split('|') if z.strip()]
@@ -67,15 +75,18 @@ def run_xyz_matrix(
     job_list = list(itertools.product(z_vals, y_vals, x_vals))
     all_images = []
     
-    yield { html_log: f"Starting generation of {total_images} images...", individual_gallery: None, grid_gallery: None, mega_grid_image: None }
+    yield {
+        html_log: f"Starting generation of {total_images} images...",
+        individual_gallery: None,
+        # Keep grid galleries from previous run visible until this one is done
+    }
     shared.state.begin(); shared.state.job_count = total_images
     for i, (z_val, y_val, x_val) in enumerate(job_list):
         if shared.state.interrupted: break
         shared.state.job = f"Image {i+1}/{total_images}"
         
         p = processing.StableDiffusionProcessingTxt2Img(
-            sd_model=shared.sd_model,
-            sd_vae=shared.sd_vae, # <-- FIX for the pause between images
+            sd_model=shared.sd_model, sd_vae=shared.sd_vae,
             prompt=p_prompt.replace("{subject}", x_val), negative_prompt=n_prompt,
             steps=int(steps), cfg_scale=float(y_val), sampler_name=z_val, scheduler=scheduler,
             width=int(width), height=int(height), seed=int(seed) + i, n_iter=1, batch_size=1, do_not_save_samples=True,
@@ -92,18 +103,16 @@ def run_xyz_matrix(
     yield {
         html_log: f"Generation of {len(all_images)} images complete. Ready to assemble grids.",
         generate_button: gr.Button.update(interactive=True),
-        assemble_button: gr.Button.update(visible=True) # <-- Show the new button
+        assemble_button: gr.Button.update(visible=True)
     }
 
 def assemble_grids_from_last_run():
-    """This function is now separate, safer, and only does CPU work."""
     if not last_run_images or not last_run_labels:
-        return { html_log: "No images from a previous run found to assemble." }
+        return { gr.HTML.update(value="No images from a previous run found to assemble.") }
 
     x_vals, y_vals, z_vals = last_run_labels['x'], last_run_labels['y'], last_run_labels['z']
     
-    # Grid Assembly
-    yield { html_log: "Assembling X/Y grids..." }
+    yield gr.HTML.update(value="Assembling X/Y grids...")
     grid_images = []
     images_per_grid = len(x_vals) * len(y_vals)
     for i, z_label in enumerate(z_vals):
@@ -111,23 +120,21 @@ def assemble_grids_from_last_run():
         grid = create_labeled_grid(grid_data, x_vals, y_vals)
         if grid: grid_images.append(grid)
     
-    # Mega-Grid Assembly
     if len(grid_images) > 1:
-        yield { grid_gallery: grid_images, html_log: "Assembling Mega-Grid..." }
+        yield { gr.Gallery.update(value=grid_images), gr.HTML.update(value="Assembling Mega-Grid...") }
         grid_w, grid_h = grid_images[0].size
         mega_grid = Image.new('RGB', (grid_w * len(grid_images), grid_h), 'white')
         for i, grid_img in enumerate(grid_images):
             mega_grid.paste(grid_img, (i * grid_w, 0))
-        yield { mega_grid_image: mega_grid, html_log: "All grids assembled." }
+        yield { gr.Image.update(value=mega_grid), gr.HTML.update(value="All grids assembled.") }
     else:
-        yield { mega_grid_image: grid_images[0] if grid_images else None, html_log: "Grid assembled." }
+        yield { gr.Image.update(value=grid_images[0] if grid_images else None), gr.HTML.update(value="Grid assembled.") }
+
 
 def create_streamer_ui():
     with gr.Blocks() as streamer_tab:
-        # ... (UI Layout remains the same)
         gr.HTML(f"<h3>XYZ Matrix POC <span style='font-size:0.8rem;color:grey;'>v{__version__}</span></h3>")
         with gr.Accordion("Global Settings", open=True):
-            # ... (all sliders and dropdowns are the same)
             with gr.Row():
                 sampler_dropdown = gr.Dropdown(label='Sampler', choices=[s.name for s in sd_samplers.all_samplers], value='Euler a')
                 scheduler_dropdown = gr.Dropdown(label='Scheduler', choices=[s.label for s in sd_schedulers.schedulers], value='Automatic')
@@ -147,7 +154,6 @@ def create_streamer_ui():
         
         with gr.Row():
             generate_button = gr.Button("Generate XYZ Matrix", variant="primary")
-            # --- NEW: The Assemble Grids button ---
             assemble_button = gr.Button("Assemble Grids from Last Run", variant="secondary", visible=False)
             
         html_log = gr.HTML(label="Log")
@@ -160,12 +166,20 @@ def create_streamer_ui():
                 mega_grid_image = gr.Image(label="Final Mega-Grid", show_label=False)
 
         # --- Event Handlers ---
+        
+        # Define the components whose values are passed to the function
         gen_inputs = [
             positive_prompt, negative_prompt, sampler_dropdown, scheduler_dropdown, steps_slider, cfg_slider, width_slider, height_slider, seed_input,
             x_input, y_input, z_input
         ]
-        gen_outputs = [individual_gallery, grid_gallery, mega_grid_image, html_log, generate_button, assemble_button]
-        generate_button.click(fn=run_xyz_matrix, inputs=gen_inputs, outputs=gen_outputs)
+        
+        # Define the components that the function will update
+        gen_outputs = [individual_gallery, html_log, generate_button, assemble_button]
+        
+        # Use functools.partial to create a new function call that includes the output components
+        # This resolves the scope issue cleanly.
+        fn_with_components = functools.partial(run_xyz_matrix, html_log, generate_button, assemble_button, individual_gallery)
+        generate_button.click(fn=fn_with_components, inputs=gen_inputs, outputs=gen_outputs)
         
         asm_outputs = [grid_gallery, mega_grid_image, html_log]
         assemble_button.click(fn=assemble_grids_from_last_run, inputs=None, outputs=asm_outputs)
