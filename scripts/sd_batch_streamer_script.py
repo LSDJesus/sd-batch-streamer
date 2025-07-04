@@ -2,11 +2,12 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.6.3
+# Version: v0.6.4
 #
 # Changelog:
-# v0.6.3: Critical Bug Fix. Resolved `SyntaxError: name 'temp_output_dir' is used prior to global declaration`
-#         by moving the global declaration to the top of the `assemble_grids_from_last_run` function.
+# v0.6.4: Critical Bug Fix. Resolved `SyntaxError` by removing redundant global declaration
+#         for `temp_output_dir` within `assemble_grids_from_last_run` function.
+# v0.6.3: Critical Bug Fix. Resolved previous `SyntaxError`.
 # v0.6.2: Critical Stability Fix for Grid Assembly.
 # v0.6.1: Memory Optimization for Grid Assembly.
 # v0.6.0: Final Stability Fix for UI loading/event handlers.
@@ -22,7 +23,7 @@ import tempfile
 import gc # Import garbage collector
 
 # --- Version Information ---
-__version__ = "0.6.3"
+__version__ = "0.6.4"
 
 # --- Globals to store data between button clicks ---
 last_run_image_paths = []
@@ -66,7 +67,7 @@ def run_xyz_matrix(
     grid_gallery = ui_components_map['grid_gallery'] 
     mega_grid_image = ui_components_map['mega_grid_image'] 
     
-    global last_run_image_paths, last_run_labels, temp_output_dir # <-- Correctly placed at the top of the function
+    global last_run_image_paths, last_run_labels, temp_output_dir # Correctly placed at the top of the function
     last_run_image_paths, last_run_labels = [], {}
 
     # Clean up previous temporary directory if it exists
@@ -137,7 +138,7 @@ def run_xyz_matrix(
     }
 
 def assemble_grids_from_last_run(ui_components_map):
-    # --- FIX: Move global declaration to the very top of the function ---
+    # --- FIX: Ensure 'global temp_output_dir' is only declared once at the top ---
     global temp_output_dir
     
     html_log = ui_components_map['html_log']
@@ -211,7 +212,7 @@ def assemble_grids_from_last_run(ui_components_map):
     if temp_output_dir and os.path.exists(temp_output_dir):
         try:
             shutil.rmtree(temp_output_dir)
-            global temp_output_dir # Correctly re-declare global before reassigning
+            # --- FIX: Removed redundant global declaration here ---
             temp_output_dir = None # Clear the global reference
         except OSError as e:
             print(f"Error removing temporary directory {temp_output_dir} after assembly: {e}")
