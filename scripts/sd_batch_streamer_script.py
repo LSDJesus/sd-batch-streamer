@@ -2,14 +2,13 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.6.2
+# Version: v0.6.3
 #
 # Changelog:
+# v0.6.3: Critical Bug Fix. Resolved `SyntaxError: name 'temp_output_dir' is used prior to global declaration`
+#         by moving the global declaration to the top of the `assemble_grids_from_last_run` function.
 # v0.6.2: Critical Stability Fix for Grid Assembly.
-#         - Implemented aggressive PIL image memory management during grid assembly:
-#           Explicitly loads pixel data, deep copies for use, and deletes references.
-#         - Added intermediate yields during grid assembly to provide better feedback and aid memory management.
-# v0.6.1: Memory Optimization for Grid Assembly (initial attempt).
+# v0.6.1: Memory Optimization for Grid Assembly.
 # v0.6.0: Final Stability Fix for UI loading/event handlers.
 #
 
@@ -23,7 +22,7 @@ import tempfile
 import gc # Import garbage collector
 
 # --- Version Information ---
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 # --- Globals to store data between button clicks ---
 last_run_image_paths = []
@@ -67,7 +66,7 @@ def run_xyz_matrix(
     grid_gallery = ui_components_map['grid_gallery'] 
     mega_grid_image = ui_components_map['mega_grid_image'] 
     
-    global last_run_image_paths, last_run_labels, temp_output_dir
+    global last_run_image_paths, last_run_labels, temp_output_dir # <-- Correctly placed at the top of the function
     last_run_image_paths, last_run_labels = [], {}
 
     # Clean up previous temporary directory if it exists
@@ -138,6 +137,9 @@ def run_xyz_matrix(
     }
 
 def assemble_grids_from_last_run(ui_components_map):
+    # --- FIX: Move global declaration to the very top of the function ---
+    global temp_output_dir
+    
     html_log = ui_components_map['html_log']
     grid_gallery = ui_components_map['grid_gallery']
     mega_grid_image = ui_components_map['mega_grid_image']
@@ -151,7 +153,7 @@ def assemble_grids_from_last_run(ui_components_map):
     grid_images = []
     images_per_grid = len(x_vals) * len(y_vals)
     
-    # Load images from disk as needed for grid assembly, and explicitly manage their memory
+    # Load images from disk as needed for grid assembly, and explicitly close them
     # We load them in chunks for each grid, not all at once.
     for i, z_label in enumerate(z_vals):
         grid_data_paths = last_run_image_paths[i * images_per_grid:(i + 1) * images_per_grid]
@@ -209,7 +211,7 @@ def assemble_grids_from_last_run(ui_components_map):
     if temp_output_dir and os.path.exists(temp_output_dir):
         try:
             shutil.rmtree(temp_output_dir)
-            global temp_output_dir
+            global temp_output_dir # Correctly re-declare global before reassigning
             temp_output_dir = None # Clear the global reference
         except OSError as e:
             print(f"Error removing temporary directory {temp_output_dir} after assembly: {e}")
@@ -255,7 +257,7 @@ def create_streamer_ui():
         all_ui_components_map = {
             'html_log': html_log, 'generate_button': generate_button, 'assemble_button': assemble_button,
             'individual_gallery': individual_gallery, 'grid_gallery': grid_gallery, 'mega_grid_image': mega_grid_image,
-            'cfg_slider': cfg_slider, 'sampler_dropdown': sampler_dropdown, # UI objects needed for dynamic updating
+            'cfg_slider': cfg_slider, 'sampler_dropdown': sampler_dropdown,
         }
 
         gen_inputs = [
@@ -264,14 +266,14 @@ def create_streamer_ui():
         ]
         
         gen_outputs_list = [
-            html_log, generate_button, assemble_button, individual_gallery, grid_gallery, mega_grid_image # Must include all potentially updated components
+            html_log, generate_button, assemble_button, individual_gallery, grid_gallery, mega_grid_image
         ]
         
         fn_with_components_for_gen = functools.partial(run_xyz_matrix, all_ui_components_map)
         generate_button.click(fn=fn_with_components_for_gen, inputs=gen_inputs, outputs=gen_outputs_list)
         
         asm_outputs_list = [
-            html_log, grid_gallery, mega_grid_image # Must include all potentially updated components
+            html_log, grid_gallery, mega_grid_image
         ]
         fn_with_components_for_asm = functools.partial(assemble_grids_from_last_run, all_ui_components_map)
         assemble_button.click(fn=fn_with_components_for_asm, inputs=None, outputs=asm_outputs_list)
