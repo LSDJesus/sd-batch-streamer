@@ -7,6 +7,7 @@
 # Changelog:
 # v0.6.4: Critical Bug Fix. Resolved `SyntaxError` by removing redundant global declaration
 #         for `temp_output_dir` within `assemble_grids_from_last_run` function.
+#         (This re-sent version ensures the 'on_ui_tabs' import is present.)
 # v0.6.3: Critical Bug Fix. Resolved previous `SyntaxError`.
 # v0.6.2: Critical Stability Fix for Grid Assembly.
 # v0.6.1: Memory Optimization for Grid Assembly.
@@ -21,6 +22,10 @@ import os
 import shutil
 import tempfile
 import gc # Import garbage collector
+
+# --- FIX: Ensure this import is present and correct ---
+from modules import shared, processing, sd_samplers, sd_schedulers
+from modules.script_callbacks import on_ui_tabs
 
 # --- Version Information ---
 __version__ = "0.6.4"
@@ -212,7 +217,6 @@ def assemble_grids_from_last_run(ui_components_map):
     if temp_output_dir and os.path.exists(temp_output_dir):
         try:
             shutil.rmtree(temp_output_dir)
-            # --- FIX: Removed redundant global declaration here ---
             temp_output_dir = None # Clear the global reference
         except OSError as e:
             print(f"Error removing temporary directory {temp_output_dir} after assembly: {e}")
