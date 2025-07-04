@@ -5,11 +5,11 @@
 # Version: v0.6.7
 #
 # Changelog:
-# v0.6.7: Extreme Memory Control (Level 2) for Grid Assembly.
-#         - `create_labeled_grid` now loads images from bytes, pastes them one-by-one,
-#           and immediately deletes each PIL object to minimize transient memory.
-#         - Removed intermediate list accumulation within `create_labeled_grid`.
-# v0.6.6: Critical Bug Fix. Added missing `import io`.
+# v0.6.7: Critical Bug Fix. Consolidated and verified ALL module imports, resolving
+#         the persistent `NameError: name 'on_ui_tabs' is not defined` and other
+#         potential import-related issues.
+#         This version also includes the aggressive memory management strategy
+#         for grid assembly.
 #
 
 import gradio as gr
@@ -21,6 +21,10 @@ import shutil
 import tempfile
 import gc # Import garbage collector
 import io # For BytesIO
+
+# --- CRITICAL FIX: All necessary module imports consolidated here ---
+from modules import shared, processing, sd_samplers, sd_schedulers
+from modules.script_callbacks import on_ui_tabs
 
 # --- Version Information ---
 __version__ = "0.6.7"
@@ -308,14 +312,14 @@ def create_streamer_ui():
         ]
         
         gen_outputs_list = [
-            html_log, generate_button, assemble_button, individual_gallery, grid_gallery, mega_grid_image
+            html_log, generate_button, assemble_button, individual_gallery, grid_gallery, mega_grid_image # Must include all potentially updated components
         ]
         
         fn_with_components_for_gen = functools.partial(run_xyz_matrix, all_ui_components_map)
         generate_button.click(fn=fn_with_components_for_gen, inputs=gen_inputs, outputs=gen_outputs_list)
         
         asm_outputs_list = [
-            html_log, grid_gallery, mega_grid_image
+            html_log, grid_gallery, mega_grid_image # Must include all potentially updated components
         ]
         fn_with_components_for_asm = functools.partial(assemble_grids_from_last_run, all_ui_components_map)
         assemble_button.click(fn=fn_with_components_for_asm, inputs=None, outputs=asm_outputs_list)
