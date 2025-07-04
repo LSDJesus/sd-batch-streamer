@@ -2,16 +2,15 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.6.4
+# Version: v0.6.5
 #
 # Changelog:
-# v0.6.4: Critical Bug Fix. Resolved `SyntaxError` by removing redundant global declaration
-#         for `temp_output_dir` within `assemble_grids_from_last_run` function.
-#         (This re-sent version ensures the 'on_ui_tabs' import is present.)
+# v0.6.5: Extreme Memory Control for Grid Assembly.
+#         - Images are now converted to in-memory bytes (PNG) after loading from disk
+#           and before passing to grid creation, forcing aggressive PIL memory release.
+#         - Grid creation re-loads images from these bytes buffers.
+# v0.6.4: Critical Bug Fix. Resolved `SyntaxError`.
 # v0.6.3: Critical Bug Fix. Resolved previous `SyntaxError`.
-# v0.6.2: Critical Stability Fix for Grid Assembly.
-# v0.6.1: Memory Optimization for Grid Assembly.
-# v0.6.0: Final Stability Fix for UI loading/event handlers.
 #
 
 import gradio as gr
@@ -22,24 +21,48 @@ import os
 import shutil
 import tempfile
 import gc # Import garbage collector
-
-# --- FIX: Ensure this import is present and correct ---
-from modules import shared, processing, sd_samplers, sd_schedulers
-from modules.script_callbacks import on_ui_tabs
+import io # For BytesIO
 
 # --- Version Information ---
-__version__ = "0.6.4"
+__version__ = "0.6.5"
 
 # --- Globals to store data between button clicks ---
-last_run_image_paths = []
+last_run_image_paths = [] # Paths to files saved on disk
 last_run_labels = {}
 temp_output_dir = None 
 
 # --- Helper Functions ---
-def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
-    if not all([images, x_labels, y_labels]): return None
+def create_labeled_grid(images_as_bytes, x_labels, y_labels, font_size=30, margin=5):
+    # Load images from bytes for grid creation
+    images = []
+    for img_bytes in images_as_bytes:
+        try:
+            img = Image.open(io.BytesIO(img_bytes))
+            img.load() # Load pixel data
+            images.append(img.copy()) # Create a copy to ensure our new object owns the data
+            img.close() # Close BytesIO internal handle
+            del img # Explicitly delete original PIL object
+        except Exception as e:
+            print(f"Error loading image from bytes for grid assembly: {e}")
+            images.append(Image.new('RGB', (1,1), 'red')) # Placeholder
+        gc.collect() # Aggressive GC
+
+    if not all([images, x_labels, y_labels]):
+        # Close any images that were loaded if there's an early exit
+        for img_obj in images:
+            if hasattr(img_obj, 'close'): img_obj.close()
+            del img_obj
+        return None
+    
     grid_cols, grid_rows = len(x_labels), len(y_labels)
-    if len(images) != grid_cols * grid_rows: return None
+    if len(images) != grid_cols * grid_rows:
+        print(f"Warning: Mismatch between image count ({len(images)}) and grid size ({grid_cols}x{grid_rows}) in create_labeled_grid.")
+        # Close any images that were loaded if there's an early exit
+        for img_obj in images:
+            if hasattr(img_obj, 'close'): img_obj.close()
+            del img_obj
+        return None
+
     img_w, img_h = images[0].size
     label_area = font_size + 2 * margin
     grid_w, grid_h = img_w * grid_cols + label_area, img_h * grid_rows + label_area
@@ -55,6 +78,12 @@ def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
         draw.text((label_area + i * img_w + (img_w - text_w) // 2, margin), str(label), fill="black", font=font)
     for i, img in enumerate(images):
         grid_image.paste(img, (label_area + (i % grid_cols) * img_w, label_area + (i // grid_cols) * img_h))
+        # Explicitly close and delete individual images after they are used for grid creation
+        if hasattr(img, 'close'): img.close()
+        del img
+    del images # Delete the list of images
+    gc.collect()
+
     return grid_image
 
 # --- Main Logic Functions ---
@@ -72,7 +101,7 @@ def run_xyz_matrix(
     grid_gallery = ui_components_map['grid_gallery'] 
     mega_grid_image = ui_components_map['mega_grid_image'] 
     
-    global last_run_image_paths, last_run_labels, temp_output_dir # Correctly placed at the top of the function
+    global last_run_image_paths, last_run_labels, temp_output_dir 
     last_run_image_paths, last_run_labels = [], {}
 
     # Clean up previous temporary directory if it exists
@@ -143,7 +172,6 @@ def run_xyz_matrix(
     }
 
 def assemble_grids_from_last_run(ui_components_map):
-    # --- FIX: Ensure 'global temp_output_dir' is only declared once at the top ---
     global temp_output_dir
     
     html_log = ui_components_map['html_log']
@@ -156,68 +184,64 @@ def assemble_grids_from_last_run(ui_components_map):
     x_vals, y_vals, z_vals = last_run_labels['x'], last_run_labels['y'], last_run_labels['z']
     
     yield { html_log: gr.HTML.update(value="Assembling X/Y grids...") }
-    grid_images = []
+    grid_images_for_display = [] # For storing the final grid PIL objects for display
     images_per_grid = len(x_vals) * len(y_vals)
     
-    # Load images from disk as needed for grid assembly, and explicitly close them
-    # We load them in chunks for each grid, not all at once.
+    # Load images from disk, convert to bytes, and discard PIL objects immediately
+    images_as_bytes_list = []
+    for img_path in last_run_image_paths:
+        try:
+            with Image.open(img_path) as img:
+                with io.BytesIO() as buffer:
+                    img.save(buffer, format="PNG") # Save as PNG bytes
+                    images_as_bytes_list.append(buffer.getvalue())
+            del img # Ensure PIL object is deleted
+        except Exception as e:
+            print(f"Error loading image {img_path} to bytes: {e}")
+            images_as_bytes_list.append(None) # Store None for failed loads
+        gc.collect() # Aggressive GC after each conversion
+
+    # Create grids from bytes data
     for i, z_label in enumerate(z_vals):
-        grid_data_paths = last_run_image_paths[i * images_per_grid:(i + 1) * images_per_grid]
-        current_grid_images = []
-        for img_path in grid_data_paths:
-            try:
-                img = Image.open(img_path)
-                img.load() # Load image data into memory
-                current_grid_images.append(img.copy()) # Create a copy to ensure data is in our new object
-                img.close() # Close original file handle
-                del img # Explicitly delete original PIL object
-            except Exception as e:
-                print(f"Error loading image {img_path} for grid assembly: {e}")
-                current_grid_images.append(Image.new('RGB', (1,1), 'red')) # Small red placeholder
-            gc.collect() # Trigger garbage collection after each image load
+        grid_data_bytes = images_as_bytes_list[i * images_per_grid:(i + 1) * images_per_grid]
+        # Filter out None values if any images failed to load
+        grid_data_bytes = [b for b in grid_data_bytes if b is not None] 
 
-        grid = create_labeled_grid(current_grid_images, x_vals, y_vals)
+        grid = create_labeled_grid(grid_data_bytes, x_vals, y_vals)
         
-        # Explicitly close and delete individual images after they are used for grid creation
-        for img_obj in current_grid_images:
-            if hasattr(img_obj, 'close'): img_obj.close()
-            del img_obj
-        del current_grid_images
-        gc.collect()
-
         if grid: 
-            grid_images.append(grid)
-            yield { grid_gallery: gr.Gallery.update(value=grid_images), html_log: gr.HTML.update(value=f"Assembled grid for Z={z_label}...") }
+            grid_images_for_display.append(grid)
+            yield { grid_gallery: gr.Gallery.update(value=grid_images_for_display), html_log: gr.HTML.update(value=f"Assembled grid for Z={z_label}...") }
             gc.collect() # Trigger garbage collection after yielding a grid
 
     # After all individual images are loaded and used, clear the list of paths to free references
     last_run_image_paths.clear()
+    images_as_bytes_list.clear() # Also clear the bytes list
+    gc.collect()
 
-    if len(grid_images) > 1:
+    if len(grid_images_for_display) > 1:
         yield { html_log: gr.HTML.update(value="Assembling Mega-Grid...") }
-        grid_w, grid_h = grid_images[0].size
-        mega_grid = Image.new('RGB', (grid_w * len(grid_images), grid_h), 'white')
-        for i, grid_img in enumerate(grid_images):
+        grid_w, grid_h = grid_images_for_display[0].size
+        mega_grid = Image.new('RGB', (grid_w * len(grid_images_for_display), grid_h), 'white')
+        for i, grid_img in enumerate(grid_images_for_display):
             mega_grid.paste(grid_img, (i * grid_w, 0))
-            if hasattr(grid_img, 'close'): # Close the sub-grids after they are pasted
-                grid_img.close()
-            del grid_img # Delete the sub-grid object
-        del grid_images # Delete the list of sub-grids
+            if hasattr(grid_img, 'close'): grid_img.close() # Close sub-grids
+            del grid_img # Delete sub-grid object
+        del grid_images_for_display # Delete the list of sub-grids
         gc.collect()
         yield { mega_grid_image: gr.Image.update(value=mega_grid), html_log: gr.HTML.update(value="All grids assembled.") }
     else:
-        # Clear grid_gallery if only one grid (no actual gallery display)
-        yield { grid_gallery: gr.Gallery.update(value=None), mega_grid_image: gr.Image.update(value=grid_images[0] if grid_images else None), html_log: gr.HTML.update(value="Grid assembled.") }
-        if len(grid_images) == 1 and hasattr(grid_images[0], 'close'):
-             grid_images[0].close() # Close the single grid if only one
-        del grid_images
+        yield { grid_gallery: gr.Gallery.update(value=None), mega_grid_image: gr.Image.update(value=grid_images_for_display[0] if grid_images_for_display else None), html_log: gr.HTML.update(value="Grid assembled.") }
+        if len(grid_images_for_display) == 1 and hasattr(grid_images_for_display[0], 'close'):
+             grid_images_for_display[0].close() # Close the single grid
+        del grid_images_for_display
         gc.collect()
 
     # Attempt to clean up the temporary directory after everything is done
     if temp_output_dir and os.path.exists(temp_output_dir):
         try:
             shutil.rmtree(temp_output_dir)
-            temp_output_dir = None # Clear the global reference
+            temp_output_dir = None
         except OSError as e:
             print(f"Error removing temporary directory {temp_output_dir} after assembly: {e}")
     
