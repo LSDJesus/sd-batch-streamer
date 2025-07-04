@@ -2,16 +2,16 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.5.9
+# Version: v0.6.0
 #
 # Changelog:
-# v0.5.9: Final Stability Fix. Correctly implemented the dictionary-based output model for
-#         all event handlers, where:
+# v0.6.0: Final Stability Fix. Implemented the strict Gradio dictionary-based output model:
 #         1. The 'outputs' parameter of .click() MUST contain a list of all potential output component objects.
 #         2. The yielded dictionaries MUST use these component objects as their keys.
-#         This resolves the "Returned component not specified as output" ValueError.
+#         3. ALL values in the yielded dictionaries MUST be wrapped in gr.Component.update() calls.
+#         This resolves the "Returned component not specified as output" ValueError and other related issues.
+# v0.5.9: (Failed Attempt) Incorrectly applied previous fix.
 # v0.5.8: (Failed Attempt) Incorrectly removed 'outputs' parameter.
-# v0.5.7: (Failed Attempt) Used string elem_ids as keys in yielded dicts, which was incorrect.
 #
 
 import gradio as gr
@@ -22,7 +22,7 @@ from modules import shared, processing, sd_samplers, sd_schedulers
 from modules.script_callbacks import on_ui_tabs
 
 # --- Version Information ---
-__version__ = "0.5.9"
+__version__ = "0.6.0"
 
 # --- Globals to store data between button clicks ---
 last_run_images = []
@@ -62,20 +62,20 @@ def run_xyz_matrix(
     generate_button = ui_components_map['generate_button']
     assemble_button = ui_components_map['assemble_button']
     individual_gallery = ui_components_map['individual_gallery']
-    grid_gallery = ui_components_map['grid_gallery'] # Need to include even if not directly updated in loop
-    mega_grid_image = ui_components_map['mega_grid_image'] # Need to include
+    grid_gallery = ui_components_map['grid_gallery']
+    mega_grid_image = ui_components_map['mega_grid_image']
     
     global last_run_images, last_run_labels
     last_run_images, last_run_labels = [], {}
 
-    # Yield updates using component objects as keys
+    # Yield updates using component objects as keys, wrapped in gr.Component.update()
     yield {
-        html_log: "Parsing inputs...",
+        html_log: gr.HTML.update(value="Parsing inputs..."),
         generate_button: gr.Button.update(interactive=False),
         assemble_button: gr.Button.update(visible=False),
-        individual_gallery: None, # Clear gallery
-        grid_gallery: None, # Clear grids
-        mega_grid_image: None # Clear mega grid
+        individual_gallery: gr.Gallery.update(value=None), # Clear gallery
+        grid_gallery: gr.Gallery.update(value=None), # Clear grids
+        mega_grid_image: gr.Image.update(value=None) # Clear mega grid
     }
     
     x_vals = [x.strip() for x in x_values_str.split('|') if x.strip()]
@@ -83,12 +83,12 @@ def run_xyz_matrix(
     z_vals = [z.strip() for z in z_values_str.split('|') if z.strip()]
     total_images = len(x_vals) * len(y_vals) * len(z_vals)
     if total_images == 0:
-        yield { html_log: "Error: No jobs to run.", generate_button: gr.Button.update(interactive=True) }; return
+        yield { html_log: gr.HTML.update(value="Error: No jobs to run."), generate_button: gr.Button.update(interactive=True) }; return
     
     job_list = list(itertools.product(z_vals, y_vals, x_vals))
     all_images = []
     
-    yield { html_log: f"Starting generation of {total_images} images..." }
+    yield { html_log: gr.HTML.update(value=f"Starting generation of {total_images} images...") }
     shared.state.begin(); shared.state.job_count = total_images
     for i, (z_val, y_val, x_val) in enumerate(job_list):
         if shared.state.interrupted: break
@@ -102,14 +102,14 @@ def run_xyz_matrix(
         proc = processing.process_images(p)
         if proc.images:
             all_images.append(proc.images[0])
-            yield { individual_gallery: all_images, html_log: f"Generated image {i+1}/{total_images}" }
+            yield { individual_gallery: gr.Gallery.update(value=all_images), html_log: gr.HTML.update(value=f"Generated image {i+1}/{total_images}") }
     shared.state.end()
 
     last_run_images = all_images
     last_run_labels = {'x': x_vals, 'y': y_vals, 'z': z_vals}
     
     yield {
-        html_log: f"Generation of {len(all_images)} images complete. Ready to assemble grids.",
+        html_log: gr.HTML.update(value=f"Generation of {len(all_images)} images complete. Ready to assemble grids."),
         generate_button: gr.Button.update(interactive=True),
         assemble_button: gr.Button.update(visible=True)
     }
@@ -121,11 +121,11 @@ def assemble_grids_from_last_run(ui_components_map):
     mega_grid_image = ui_components_map['mega_grid_image']
 
     if not last_run_images or not last_run_labels:
-        yield { html_log: "No images from a previous run found to assemble." }; return
+        yield { html_log: gr.HTML.update(value="No images from a previous run found to assemble.") }; return
 
     x_vals, y_vals, z_vals = last_run_labels['x'], last_run_labels['y'], last_run_labels['z']
     
-    yield { html_log: "Assembling X/Y grids..." }
+    yield { html_log: gr.HTML.update(value="Assembling X/Y grids...") }
     grid_images = []
     images_per_grid = len(x_vals) * len(y_vals)
     for i, z_label in enumerate(z_vals):
@@ -134,14 +134,14 @@ def assemble_grids_from_last_run(ui_components_map):
         if grid: grid_images.append(grid)
     
     if len(grid_images) > 1:
-        yield { grid_gallery: grid_images, html_log: "Assembling Mega-Grid..." }
+        yield { grid_gallery: gr.Gallery.update(value=grid_images), html_log: gr.HTML.update(value="Assembling Mega-Grid...") }
         grid_w, grid_h = grid_images[0].size
         mega_grid = Image.new('RGB', (grid_w * len(grid_images), grid_h), 'white')
         for i, grid_img in enumerate(grid_images):
             mega_grid.paste(grid_img, (i * grid_w, 0))
-        yield { mega_grid_image: mega_grid, html_log: "All grids assembled." }
+        yield { mega_grid_image: gr.Image.update(value=mega_grid), html_log: gr.HTML.update(value="All grids assembled.") }
     else:
-        yield { grid_gallery: None, mega_grid_image: grid_images[0] if grid_images else None, html_log: "Grid assembled." }
+        yield { grid_gallery: gr.Gallery.update(value=None), mega_grid_image: gr.Image.update(value=grid_images[0] if grid_images else None), html_log: gr.HTML.update(value="Grid assembled.") }
 
 
 def create_streamer_ui():
@@ -178,10 +178,10 @@ def create_streamer_ui():
             with gr.TabItem("Mega-Grid"):
                 mega_grid_image = gr.Image(label="Final Mega-Grid", show_label=False)
 
-        # --- Event Handlers (FINAL FIX) ---
+        # --- Event Handlers (FINAL, DEFINITIVE FIX) ---
         
-        # A dictionary to pass component objects to the handler functions
-        # This is the map that functools.partial will use.
+        # This dictionary holds references to the UI components.
+        # It's passed to the logic functions via functools.partial.
         all_ui_components_map = {
             'html_log': html_log,
             'generate_button': generate_button,
@@ -189,7 +189,8 @@ def create_streamer_ui():
             'individual_gallery': individual_gallery,
             'grid_gallery': grid_gallery,
             'mega_grid_image': mega_grid_image,
-            # Including these because they are updated in run_xyz_matrix, although not directly yielded
+            # Include these as they are sometimes updated in the loop,
+            # even though they are not explicitly outputs in the final UI update list
             'cfg_slider': cfg_slider,
             'sampler_dropdown': sampler_dropdown,
         }
@@ -200,28 +201,27 @@ def create_streamer_ui():
             x_input, y_input, z_input
         ]
         
-        # Define the explicit list of all components that run_xyz_matrix *might update*
-        # This list MUST match the keys of the dictionaries yielded by run_xyz_matrix.
-        # Order matters here if we were to yield a tuple, but for yielding dicts, order in this list does not matter.
+        # Define the explicit list of ALL components that run_xyz_matrix *might update*.
+        # This list MUST exactly match the set of keys used in yielded dictionaries.
+        # The order in this list does NOT matter when yielding dictionaries.
         gen_outputs_list = [
             html_log, generate_button, assemble_button, individual_gallery,
-            grid_gallery, mega_grid_image, cfg_slider, sampler_dropdown # Include all components that might be updated
+            grid_gallery, mega_grid_image, cfg_slider, sampler_dropdown
         ]
         
         # The functools.partial creates a new function where the first argument (components map) is pre-filled
         fn_with_components_for_gen = functools.partial(run_xyz_matrix, all_ui_components_map)
         
-        # The outputs parameter MUST be defined when the function yields dictionaries
-        # It must contain all the components that the function yields
+        # The 'outputs' parameter MUST be defined when the function yields dictionaries.
+        # It must contain references to all the components that the function yields updates for.
         generate_button.click(fn=fn_with_components_for_gen, inputs=gen_inputs, outputs=gen_outputs_list)
         
-        # For the assemble function, pass the same components map
-        fn_with_components_for_asm = functools.partial(assemble_grids_from_last_run, all_ui_components_map)
-        
-        # Define the explicit list of all components that assemble_grids_from_last_run *might update*
+        # Define the components that assemble_grids_from_last_run might update
         asm_outputs_list = [
             html_log, grid_gallery, mega_grid_image
         ]
+        # For the assemble function, pass the same components map
+        fn_with_components_for_asm = functools.partial(assemble_grids_from_last_run, all_ui_components_map)
         assemble_button.click(fn=fn_with_components_for_asm, inputs=None, outputs=asm_outputs_list)
 
     return streamer_tab
