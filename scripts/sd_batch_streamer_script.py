@@ -2,15 +2,14 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.6.5
+# Version: v0.6.6
 #
 # Changelog:
-# v0.6.5: Extreme Memory Control for Grid Assembly.
-#         - Images are now converted to in-memory bytes (PNG) after loading from disk
-#           and before passing to grid creation, forcing aggressive PIL memory release.
-#         - Grid creation re-loads images from these bytes buffers.
+# v0.6.6: Critical Bug Fix. Added ALL missing import statements, including `on_ui_tabs`,
+#         `sd_samplers`, `sd_schedulers`, and `shared`, ensuring the script loads correctly.
+#         This resolves the persistent `NameError`.
+# v0.6.5: Extreme Memory Control for Grid Assembly (missing imports).
 # v0.6.4: Critical Bug Fix. Resolved `SyntaxError`.
-# v0.6.3: Critical Bug Fix. Resolved previous `SyntaxError`.
 #
 
 import gradio as gr
@@ -23,8 +22,12 @@ import tempfile
 import gc # Import garbage collector
 import io # For BytesIO
 
+# --- CRITICAL FIX: Ensure all modules are correctly imported at the top ---
+from modules import shared, processing, sd_samplers, sd_schedulers
+from modules.script_callbacks import on_ui_tabs 
+
 # --- Version Information ---
-__version__ = "0.6.5"
+__version__ = "0.6.6"
 
 # --- Globals to store data between button clicks ---
 last_run_image_paths = [] # Paths to files saved on disk
@@ -36,10 +39,13 @@ def create_labeled_grid(images_as_bytes, x_labels, y_labels, font_size=30, margi
     # Load images from bytes for grid creation
     images = []
     for img_bytes in images_as_bytes:
+        if img_bytes is None: # Handle cases where image load failed earlier
+            images.append(Image.new('RGB', (1,1), 'red')) # Placeholder
+            continue
         try:
             img = Image.open(io.BytesIO(img_bytes))
             img.load() # Load pixel data
-            images.append(img.copy()) # Create a copy to ensure our new object owns the data
+            images.append(img.copy()) # Create a copy to ensure data is in our new object
             img.close() # Close BytesIO internal handle
             del img # Explicitly delete original PIL object
         except Exception as e:
@@ -231,9 +237,10 @@ def assemble_grids_from_last_run(ui_components_map):
         gc.collect()
         yield { mega_grid_image: gr.Image.update(value=mega_grid), html_log: gr.HTML.update(value="All grids assembled.") }
     else:
+        # Clear grid_gallery if only one grid (no actual gallery display)
         yield { grid_gallery: gr.Gallery.update(value=None), mega_grid_image: gr.Image.update(value=grid_images_for_display[0] if grid_images_for_display else None), html_log: gr.HTML.update(value="Grid assembled.") }
         if len(grid_images_for_display) == 1 and hasattr(grid_images_for_display[0], 'close'):
-             grid_images_for_display[0].close() # Close the single grid
+             grid_images_for_display[0].close() # Close the single grid if only one
         del grid_images_for_display
         gc.collect()
 
