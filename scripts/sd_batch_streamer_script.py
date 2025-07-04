@@ -2,25 +2,23 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.5.0
+# Version: v0.5.1
 #
 # Changelog:
+# v0.5.1: Bug fix. Correctly import 'sd_schedulers' module instead of accessing it via 'shared'.
 # v0.5.0: Proof of Concept. Added X/Y/Z Matrix functionality.
-#         - Generates a full permutation of 3 input axes.
-#         - Streams individual images to the UI in real-time.
-#         - Assembles results into labeled X/Y grids.
-#         - Assembles X/Y grids into a final Mega Grid.
 # v0.4.1: Bug fix. Corrected Gradio event handler configuration.
 #
 
 import gradio as gr
 import itertools
 from PIL import Image, ImageDraw, ImageFont
-from modules import shared, processing, sd_samplers
+# --- FIX: Import sd_schedulers directly ---
+from modules import shared, processing, sd_samplers, sd_schedulers
 from modules.script_callbacks import on_ui_tabs
 
 # --- Version Information ---
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 # --- Helper Functions ---
 
@@ -32,7 +30,6 @@ def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
     grid_cols = len(x_labels)
     grid_rows = len(y_labels)
     
-    # Ensure we have enough images
     if len(images) != grid_cols * grid_rows:
         print(f"Warning: Mismatch between image count ({len(images)}) and grid size ({grid_cols}x{grid_rows}).")
         return None
@@ -40,7 +37,6 @@ def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
     img_w, img_h = images[0].size
     label_area_size = font_size + 2 * margin
 
-    # Create a new canvas for the grid plus labels
     grid_w = img_w * grid_cols + label_area_size
     grid_h = img_h * grid_rows + label_area_size
     grid_image = Image.new('RGB', (grid_w, grid_h), 'white')
@@ -52,19 +48,16 @@ def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
         print("Arial font not found, using default. Labels may be small.")
         font = ImageFont.load_default()
 
-    # Draw Y labels (rows)
     for i, label in enumerate(y_labels):
         x = margin
         y = label_area_size + i * img_h + img_h // 2 - font_size // 2
         draw.text((x, y), str(label), fill="black", font=font)
 
-    # Draw X labels (columns)
     for i, label in enumerate(x_labels):
         x = label_area_size + i * img_w + img_w // 2 - len(str(label)) * font_size // 4
         y = margin
         draw.text((x, y), str(label), fill="black", font=font)
 
-    # Paste images into the grid
     for i, img in enumerate(images):
         col = i % grid_cols
         row = i // grid_cols
@@ -78,14 +71,10 @@ def create_streamer_ui():
     """Creates the Gradio UI components for our proof-of-concept tab."""
     with gr.Blocks() as streamer_tab:
         
-        # The main processing function
         def run_xyz_matrix(
-            # Global settings
             p_prompt, n_prompt, sampler, scheduler, steps, cfg, width, height, seed,
-            # Matrix inputs
             x_values_str, y_values_str, z_values_str
         ):
-            # --- Phase 1: Pre-processing & Job Creation ---
             yield { html_log: "Phase 1: Parsing inputs and creating job list...", generate_button: gr.Button.update(interactive=False) }
 
             x_values = [x.strip() for x in x_values_str.split('|')]
@@ -98,10 +87,8 @@ def create_streamer_ui():
                 return
 
             job_list = list(itertools.product(z_values, y_values, x_values))
-            
             all_individual_images = []
             
-            # --- Phase 2: Live Image Generation ---
             yield { html_log: f"Phase 2: Starting generation of {total_images} images..." }
             
             shared.state.begin(); shared.state.job_count = total_images
@@ -109,18 +96,17 @@ def create_streamer_ui():
                 if shared.state.interrupted: break
                 shared.state.job = f"Image {i+1}/{total_images}"
                 
-                # Create a fresh processing object for every single image
                 p_copy = processing.StableDiffusionProcessingTxt2Img(
                     sd_model=shared.sd_model,
                     prompt=p_prompt.replace("{subject}", x_val),
                     negative_prompt=n_prompt,
                     steps=int(steps),
-                    cfg_scale=float(y_val), # Y is CFG
-                    sampler_name=z_val,     # Z is Sampler
+                    cfg_scale=float(y_val),
+                    sampler_name=z_val,
                     scheduler=scheduler,
                     width=int(width),
                     height=int(height),
-                    seed=int(seed) + i, # Increment seed for variety
+                    seed=int(seed) + i,
                     n_iter=1, batch_size=1, do_not_save_samples=True,
                 )
                 
@@ -129,8 +115,6 @@ def create_streamer_ui():
                 if processed_single.images:
                     new_image = processed_single.images[0]
                     all_individual_images.append(new_image)
-                    
-                    # Yield a complete UI update after every image
                     yield {
                         individual_gallery: all_individual_images,
                         html_log: f"Phase 2: Generated image {i+1}/{total_images} (Subject: {x_val}, CFG: {y_val}, Sampler: {z_val})",
@@ -140,36 +124,26 @@ def create_streamer_ui():
             
             shared.state.end()
             
-            # --- Phase 3: Grid Assembly ---
             yield { html_log: "Phase 3: Assembling X/Y grids..." }
-            
             final_grid_images = []
             num_images_per_grid = len(x_values) * len(y_values)
-
             for i, z_label in enumerate(z_values):
                 start_index = i * num_images_per_grid
                 end_index = start_index + num_images_per_grid
                 images_for_grid = all_individual_images[start_index:end_index]
-                
-                # The Y-axis labels are CFG, X-axis are subjects
                 grid = create_labeled_grid(images_for_grid, x_values, y_values)
                 if grid:
                     final_grid_images.append(grid)
-            
             yield { grid_gallery: final_grid_images, html_log: "Phase 3: X/Y grids assembled." }
             
-            # --- Phase 4: Mega-Grid Assembly ---
             if len(final_grid_images) > 1:
                 yield { html_log: "Phase 4: Assembling Mega-Grid..." }
-                
                 grid_w, grid_h = final_grid_images[0].size
                 mega_grid_w = grid_w * len(final_grid_images)
                 mega_grid_h = grid_h
-                
                 mega_grid = Image.new('RGB', (mega_grid_w, mega_grid_h), 'white')
                 for i, grid_img in enumerate(final_grid_images):
                     mega_grid.paste(grid_img, (i * grid_w, 0))
-                
                 yield { mega_grid_image: mega_grid, html_log: "All phases complete." }
             else:
                  yield { mega_grid_image: final_grid_images[0] if final_grid_images else None, html_log: "All phases complete." }
@@ -183,7 +157,8 @@ def create_streamer_ui():
             with gr.Accordion("Global Settings", open=True):
                 with gr.Row():
                     sampler_dropdown = gr.Dropdown(label='Sampler', choices=[s.name for s in sd_samplers.all_samplers], value='Euler a')
-                    scheduler_dropdown = gr.Dropdown(label='Scheduler', choices=[s.label for s in shared.sd_schedulers.schedulers], value='Automatic')
+                    # --- FIX: Use imported sd_schedulers module ---
+                    scheduler_dropdown = gr.Dropdown(label='Scheduler', choices=[s.label for s in sd_schedulers.schedulers], value='Automatic')
                 with gr.Row():
                     steps_slider = gr.Slider(minimum=1, maximum=150, step=1, label="Steps", value=20)
                     cfg_slider = gr.Slider(minimum=1.0, maximum=30.0, step=0.5, label="CFG Scale", value=7.0)
@@ -198,7 +173,7 @@ def create_streamer_ui():
             with gr.Accordion("Matrix Inputs", open=True):
                 x_input = gr.Textbox(label="X Axis (Subject)", placeholder="Use '|' to separate values", value="dog|woman|elephant")
                 y_input = gr.Textbox(label="Y Axis (CFG Scale)", placeholder="Use '|' to separate values", value="3|6|9")
-                z_input = gr.Textbox(label="Z Axis (Sampler)", placeholder="Use '|' to separate values", value="Euler a|DPM++ 2M Karras|DPM2 2M")
+                z_input = gr.Textbox(label="Z Axis (Sampler)", placeholder="Use '|' to separate values", value="Euler a|DPM++ 2M Karras|DPM2")
 
             generate_button = gr.Button("Generate XYZ Matrix", variant="primary")
             html_log = gr.HTML(label="Log")
@@ -225,7 +200,6 @@ def create_streamer_ui():
 
 def add_new_tab_to_ui():
     new_tab = create_streamer_ui()
-    # To avoid conflicts, we can rename the tab or you can have multiple script files.
     return [(new_tab, "XYZ Matrix POC", "xyz_matrix_poc_tab")]
 
 on_ui_tabs(add_new_tab_to_ui)
