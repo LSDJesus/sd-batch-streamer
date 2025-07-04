@@ -2,14 +2,14 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.6.6
+# Version: v0.6.7
 #
 # Changelog:
-# v0.6.6: Critical Bug Fix. Added ALL missing import statements, including `on_ui_tabs`,
-#         `sd_samplers`, `sd_schedulers`, and `shared`, ensuring the script loads correctly.
-#         This resolves the persistent `NameError`.
-# v0.6.5: Extreme Memory Control for Grid Assembly (missing imports).
-# v0.6.4: Critical Bug Fix. Resolved `SyntaxError`.
+# v0.6.7: Extreme Memory Control (Level 2) for Grid Assembly.
+#         - `create_labeled_grid` now loads images from bytes, pastes them one-by-one,
+#           and immediately deletes each PIL object to minimize transient memory.
+#         - Removed intermediate list accumulation within `create_labeled_grid`.
+# v0.6.6: Critical Bug Fix. Added missing `import io`.
 #
 
 import gradio as gr
@@ -22,12 +22,8 @@ import tempfile
 import gc # Import garbage collector
 import io # For BytesIO
 
-# --- CRITICAL FIX: Ensure all modules are correctly imported at the top ---
-from modules import shared, processing, sd_samplers, sd_schedulers
-from modules.script_callbacks import on_ui_tabs 
-
 # --- Version Information ---
-__version__ = "0.6.6"
+__version__ = "0.6.7"
 
 # --- Globals to store data between button clicks ---
 last_run_image_paths = [] # Paths to files saved on disk
@@ -36,59 +32,69 @@ temp_output_dir = None
 
 # --- Helper Functions ---
 def create_labeled_grid(images_as_bytes, x_labels, y_labels, font_size=30, margin=5):
-    # Load images from bytes for grid creation
-    images = []
-    for img_bytes in images_as_bytes:
-        if img_bytes is None: # Handle cases where image load failed earlier
-            images.append(Image.new('RGB', (1,1), 'red')) # Placeholder
-            continue
-        try:
-            img = Image.open(io.BytesIO(img_bytes))
-            img.load() # Load pixel data
-            images.append(img.copy()) # Create a copy to ensure data is in our new object
-            img.close() # Close BytesIO internal handle
-            del img # Explicitly delete original PIL object
-        except Exception as e:
-            print(f"Error loading image from bytes for grid assembly: {e}")
-            images.append(Image.new('RGB', (1,1), 'red')) # Placeholder
-        gc.collect() # Aggressive GC
-
-    if not all([images, x_labels, y_labels]):
-        # Close any images that were loaded if there's an early exit
-        for img_obj in images:
-            if hasattr(img_obj, 'close'): img_obj.close()
-            del img_obj
+    # Determine img_w, img_h from the first image in bytes
+    if not images_as_bytes:
         return None
-    
+    try:
+        # Temporarily open first image to get dimensions
+        first_img = Image.open(io.BytesIO(images_as_bytes[0]))
+        img_w, img_h = first_img.size
+        first_img.close() # Close file handle
+        del first_img # Delete PIL object
+        gc.collect()
+    except Exception as e:
+        print(f"Error getting dimensions from first image bytes: {e}")
+        return None
+
+    if not all([x_labels, y_labels]): return None
     grid_cols, grid_rows = len(x_labels), len(y_labels)
-    if len(images) != grid_cols * grid_rows:
-        print(f"Warning: Mismatch between image count ({len(images)}) and grid size ({grid_cols}x{grid_rows}) in create_labeled_grid.")
-        # Close any images that were loaded if there's an early exit
-        for img_obj in images:
-            if hasattr(img_obj, 'close'): img_obj.close()
-            del img_obj
+    
+    # Check if images_as_bytes count matches expected grid size
+    if len(images_as_bytes) != grid_cols * grid_rows:
+        print(f"Warning: Mismatch between image count ({len(images_as_bytes)}) and grid size ({grid_cols}x{grid_rows}) in create_labeled_grid.")
+        # If dimensions could not be determined or mismatch, return None
         return None
 
-    img_w, img_h = images[0].size
     label_area = font_size + 2 * margin
     grid_w, grid_h = img_w * grid_cols + label_area, img_h * grid_rows + label_area
     grid_image = Image.new('RGB', (grid_w, grid_h), 'white')
     draw = ImageDraw.Draw(grid_image)
     try: font = ImageFont.truetype("arial.ttf", font_size)
     except IOError: font = ImageFont.load_default()
+
+    # Draw Y labels (rows)
     for i, label in enumerate(y_labels):
         draw.text((margin, label_area + i * img_h + (img_h - font_size) // 2), str(label), fill="black", font=font)
+    
+    # Draw X labels (columns)
     for i, label in enumerate(x_labels):
         text_bbox = draw.textbbox((0, 0), str(label), font=font)
         text_w = text_bbox[2] - text_bbox[0]
         draw.text((label_area + i * img_w + (img_w - text_w) // 2, margin), str(label), fill="black", font=font)
-    for i, img in enumerate(images):
-        grid_image.paste(img, (label_area + (i % grid_cols) * img_w, label_area + (i // grid_cols) * img_h))
-        # Explicitly close and delete individual images after they are used for grid creation
-        if hasattr(img, 'close'): img.close()
-        del img
-    del images # Delete the list of images
-    gc.collect()
+    
+    # --- CRITICAL MEMORY OPTIMIZATION HERE: Process images one-by-one ---
+    for i, img_bytes in enumerate(images_as_bytes):
+        img_to_paste = None
+        if img_bytes is None: # Skip if image failed to load earlier
+            img_to_paste = Image.new('RGB', (img_w, img_h), 'red') # Placeholder
+        else:
+            try:
+                img_to_paste = Image.open(io.BytesIO(img_bytes))
+                img_to_paste.load() # Load pixel data into memory
+            except Exception as e:
+                print(f"Error re-loading image from bytes for pasting: {e}")
+                img_to_paste = Image.new('RGB', (img_w, img_h), 'red') # Placeholder
+        
+        col = i % grid_cols
+        row = i // grid_cols
+        x_offset = label_area + col * img_w
+        y_offset = label_area + row * img_h
+        grid_image.paste(img_to_paste, (x_offset, y_offset))
+        
+        # IMMEDIATELY close and delete the image after pasting
+        if hasattr(img_to_paste, 'close'): img_to_paste.close()
+        del img_to_paste
+        gc.collect() # Aggressive GC after each paste
 
     return grid_image
 
