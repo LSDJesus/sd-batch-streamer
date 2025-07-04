@@ -2,220 +2,230 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.4.1
+# Version: v0.5.0
 #
 # Changelog:
-# v0.4.1: Bug fix. Corrected Gradio event handler configuration by removing redundant 'outputs'
-#         argument when a dictionary is returned, fixing a UI loading crash.
-# v0.4.0: Major Feature Update. Added params.txt persistence, preset management, and apply button.
-# v0.3.1: Bug fix. Explicitly set do_not_save_samples=True.
+# v0.5.0: Proof of Concept. Added X/Y/Z Matrix functionality.
+#         - Generates a full permutation of 3 input axes.
+#         - Streams individual images to the UI in real-time.
+#         - Assembles results into labeled X/Y grids.
+#         - Assembles X/Y grids into a final Mega Grid.
+# v0.4.1: Bug fix. Corrected Gradio event handler configuration.
 #
 
 import gradio as gr
-import json
-import os
-import re
-import tempfile
+import itertools
+from PIL import Image, ImageDraw, ImageFont
 from modules import shared, processing, sd_samplers
 from modules.script_callbacks import on_ui_tabs
-from modules.paths_internal import script_path
-from modules.ui_components import ToolButton
 
 # --- Version Information ---
-__version__ = "0.4.1"
-
-# --- Globals for this script ---
-image_params_storage = {}
-params_file_path = os.path.join(script_path, "params.txt")
+__version__ = "0.5.0"
 
 # --- Helper Functions ---
 
-def parse_infotext(infotext):
-    """Parses a string of infotext and returns a dictionary of parameters."""
-    params = {}
-    if not infotext: return params
+def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
+    """Creates a grid of images with labels for X and Y axes."""
+    if not images or not x_labels or not y_labels:
+        return None
     
-    prompt_text = infotext.split("Negative prompt:")[0].strip()
-    params['prompt'] = prompt_text
+    grid_cols = len(x_labels)
+    grid_rows = len(y_labels)
     
-    neg_prompt_match = re.search(r"Negative prompt: (.*?)\nSteps:", infotext, re.DOTALL)
-    if neg_prompt_match:
-        params['negative_prompt'] = neg_prompt_match.group(1).strip()
-    
-    patterns = {
-        'steps': r"Steps: (\d+)", 'sampler_name': r"Sampler: ([\w\+\s]+),?",
-        'cfg_scale': r"CFG scale: ([\d\.]+)", 'seed': r"Seed: (\d+)",
-        'width': r"Size: (\d+)x\d+", 'height': r"Size: \d+x(\d+)",
-    }
-    
-    for key, pattern in patterns.items():
-        match = re.search(pattern, infotext)
-        if match:
-            value = match.group(1)
-            if key in ['steps', 'seed', 'width', 'height']: params[key] = int(value)
-            elif key == 'cfg_scale': params[key] = float(value)
-            else: params[key] = value.strip()
-                
-    return params
+    # Ensure we have enough images
+    if len(images) != grid_cols * grid_rows:
+        print(f"Warning: Mismatch between image count ({len(images)}) and grid size ({grid_cols}x{grid_rows}).")
+        return None
 
-def create_infotext(params):
-    """Creates an infotext string from a dictionary of parameters."""
-    p = {
-        'prompt': params.get('prompt', ''), 'negative_prompt': params.get('negative_prompt', ''),
-        'steps': params.get('steps', 20), 'sampler_name': params.get('sampler_name', 'Euler a'),
-        'cfg_scale': params.get('cfg_scale', 7.0), 'seed': params.get('seed', -1),
-        'width': params.get('width', 512), 'height': params.get('height', 512),
-    }
-    infotext = f"{p['prompt']}\nNegative prompt: {p['negative_prompt']}\n"
-    infotext += f"Steps: {p['steps']}, Sampler: {p['sampler_name']}, CFG scale: {p['cfg_scale']}, Seed: {p['seed']}, Size: {p['width']}x{p['height']}"
-    return infotext
+    img_w, img_h = images[0].size
+    label_area_size = font_size + 2 * margin
+
+    # Create a new canvas for the grid plus labels
+    grid_w = img_w * grid_cols + label_area_size
+    grid_h = img_h * grid_rows + label_area_size
+    grid_image = Image.new('RGB', (grid_w, grid_h), 'white')
+    draw = ImageDraw.Draw(grid_image)
+
+    try:
+        font = ImageFont.truetype("arial.ttf", font_size)
+    except IOError:
+        print("Arial font not found, using default. Labels may be small.")
+        font = ImageFont.load_default()
+
+    # Draw Y labels (rows)
+    for i, label in enumerate(y_labels):
+        x = margin
+        y = label_area_size + i * img_h + img_h // 2 - font_size // 2
+        draw.text((x, y), str(label), fill="black", font=font)
+
+    # Draw X labels (columns)
+    for i, label in enumerate(x_labels):
+        x = label_area_size + i * img_w + img_w // 2 - len(str(label)) * font_size // 4
+        y = margin
+        draw.text((x, y), str(label), fill="black", font=font)
+
+    # Paste images into the grid
+    for i, img in enumerate(images):
+        col = i % grid_cols
+        row = i // grid_cols
+        x_offset = label_area_size + col * img_w
+        y_offset = label_area_size + row * img_h
+        grid_image.paste(img, (x_offset, y_offset))
+        
+    return grid_image
 
 def create_streamer_ui():
-    """Creates the Gradio UI components for our tab."""
-    default_params = {
-        'prompt': '', 'negative_prompt': '', 'steps': 20, 'cfg_scale': 7.0,
-        'width': 512, 'height': 512, 'sampler_name': 'Euler a'
-    }
-    if os.path.exists(params_file_path):
-        with open(params_file_path, 'r', encoding='utf-8') as f:
-            try:
-                loaded_params = parse_infotext(f.read())
-                default_params.update(loaded_params)
-            except Exception as e:
-                print(f"SD Batch Streamer: Could not parse params.txt, using defaults. Error: {e}")
-
+    """Creates the Gradio UI components for our proof-of-concept tab."""
     with gr.Blocks() as streamer_tab:
         
-        def process_and_stream_images(prompts_text, negative_prompt, steps_val, cfg_val, width, height, sampler_name):
-            first_prompt = prompts_text.splitlines()[0].strip() if prompts_text else ""
-            current_params = {
-                'prompt': first_prompt, 'negative_prompt': negative_prompt, 'steps': steps_val,
-                'cfg_scale': cfg_val, 'width': width, 'height': height, 'sampler_name': sampler_name
-            }
-            try:
-                with open(params_file_path, 'w', encoding='utf-8') as f:
-                    f.write(create_infotext(current_params))
-            except Exception as e:
-                print(f"SD Batch Streamer: Error writing to params.txt: {e}")
+        # The main processing function
+        def run_xyz_matrix(
+            # Global settings
+            p_prompt, n_prompt, sampler, scheduler, steps, cfg, width, height, seed,
+            # Matrix inputs
+            x_values_str, y_values_str, z_values_str
+        ):
+            # --- Phase 1: Pre-processing & Job Creation ---
+            yield { html_log: "Phase 1: Parsing inputs and creating job list...", generate_button: gr.Button.update(interactive=False) }
+
+            x_values = [x.strip() for x in x_values_str.split('|')]
+            y_values = [y.strip() for y in y_values_str.split('|')]
+            z_values = [z.strip() for z in z_values_str.split('|')]
             
-            global image_params_storage; image_params_storage.clear()
-            yield {output_gallery: gr.Gallery.update(value=[], visible=True)}
-            prompts = [p.strip() for p in prompts_text.splitlines() if p.strip()]
-            if not prompts: yield {output_gallery: []}; return
-            print(f"SD Batch Streamer (v{__version__}): Starting generation for {len(prompts)} prompts.")
-            all_images = []
-            yield {stream_button: gr.Button.update(value="Generating...", interactive=False)}
-            shared.state.begin(); shared.state.job_count = len(prompts)
-            for i, prompt in enumerate(prompts):
-                shared.state.job = f"Prompt: {prompt[:80]}..."; shared.state.job_no = i + 1
+            total_images = len(x_values) * len(y_values) * len(z_values)
+            if total_images == 0:
+                yield { html_log: "Error: No jobs to run. Check X, Y, and Z inputs.", generate_button: gr.Button.update(interactive=True) }
+                return
+
+            job_list = list(itertools.product(z_values, y_values, x_values))
+            
+            all_individual_images = []
+            
+            # --- Phase 2: Live Image Generation ---
+            yield { html_log: f"Phase 2: Starting generation of {total_images} images..." }
+            
+            shared.state.begin(); shared.state.job_count = total_images
+            for i, (z_val, y_val, x_val) in enumerate(job_list):
                 if shared.state.interrupted: break
-                p = processing.StableDiffusionProcessingTxt2Img(
-                    sd_model=shared.sd_model, prompt=prompt, negative_prompt=negative_prompt, steps=int(steps_val),
-                    cfg_scale=float(cfg_val), sampler_name=sampler_name, seed=-1, width=int(width), height=int(height),
+                shared.state.job = f"Image {i+1}/{total_images}"
+                
+                # Create a fresh processing object for every single image
+                p_copy = processing.StableDiffusionProcessingTxt2Img(
+                    sd_model=shared.sd_model,
+                    prompt=p_prompt.replace("{subject}", x_val),
+                    negative_prompt=n_prompt,
+                    steps=int(steps),
+                    cfg_scale=float(y_val), # Y is CFG
+                    sampler_name=z_val,     # Z is Sampler
+                    scheduler=scheduler,
+                    width=int(width),
+                    height=int(height),
+                    seed=int(seed) + i, # Increment seed for variety
                     n_iter=1, batch_size=1, do_not_save_samples=True,
                 )
-                processed = processing.process_images(p)
-                if processed.images:
-                    new_image = processed.images[0]
-                    all_images.append(new_image)
-                    image_params_storage[i] = {
-                        "prompt": prompt, "negative_prompt": negative_prompt, "steps": steps_val, "cfg_scale": cfg_val,
-                        "width": width, "height": height, "sampler_name": sampler_name, "seed": processed.seed
+                
+                processed_single = processing.process_images(p_copy)
+                
+                if processed_single.images:
+                    new_image = processed_single.images[0]
+                    all_individual_images.append(new_image)
+                    
+                    # Yield a complete UI update after every image
+                    yield {
+                        individual_gallery: all_individual_images,
+                        html_log: f"Phase 2: Generated image {i+1}/{total_images} (Subject: {x_val}, CFG: {y_val}, Sampler: {z_val})",
+                        cfg_slider: gr.Slider.update(value=float(y_val)),
+                        sampler_dropdown: gr.Dropdown.update(value=z_val)
                     }
-                    yield {output_gallery: all_images}
+            
             shared.state.end()
-            yield {
-                output_gallery: all_images,
-                stream_button: gr.Button.update(value="Generate and Stream", interactive=True)
-            }
+            
+            # --- Phase 3: Grid Assembly ---
+            yield { html_log: "Phase 3: Assembling X/Y grids..." }
+            
+            final_grid_images = []
+            num_images_per_grid = len(x_values) * len(y_values)
 
-        def on_gallery_select(evt: gr.SelectData):
-            params = image_params_storage.get(evt.index)
-            if not params: return {}
-            return {
-                prompts_input: f"{params['prompt']}\n", negative_prompt: params["negative_prompt"], steps: params["steps"],
-                cfg_scale: params["cfg_scale"], width: params["width"], height: params["height"], sampler: params["sampler_name"]
-            }
+            for i, z_label in enumerate(z_values):
+                start_index = i * num_images_per_grid
+                end_index = start_index + num_images_per_grid
+                images_for_grid = all_individual_images[start_index:end_index]
+                
+                # The Y-axis labels are CFG, X-axis are subjects
+                grid = create_labeled_grid(images_for_grid, x_values, y_values)
+                if grid:
+                    final_grid_images.append(grid)
+            
+            yield { grid_gallery: final_grid_images, html_log: "Phase 3: X/Y grids assembled." }
+            
+            # --- Phase 4: Mega-Grid Assembly ---
+            if len(final_grid_images) > 1:
+                yield { html_log: "Phase 4: Assembling Mega-Grid..." }
+                
+                grid_w, grid_h = final_grid_images[0].size
+                mega_grid_w = grid_w * len(final_grid_images)
+                mega_grid_h = grid_h
+                
+                mega_grid = Image.new('RGB', (mega_grid_w, mega_grid_h), 'white')
+                for i, grid_img in enumerate(final_grid_images):
+                    mega_grid.paste(grid_img, (i * grid_w, 0))
+                
+                yield { mega_grid_image: mega_grid, html_log: "All phases complete." }
+            else:
+                 yield { mega_grid_image: final_grid_images[0] if final_grid_images else None, html_log: "All phases complete." }
 
-        def apply_parameters(prompts_text):
-            text_to_parse = prompts_text.strip()
-            if not text_to_parse and os.path.exists(params_file_path):
-                with open(params_file_path, 'r', encoding='utf-8') as f: text_to_parse = f.read()
-            if not text_to_parse: return {}
-            params = parse_infotext(text_to_parse)
-            return {
-                prompts_input: params.get('prompt', ''), negative_prompt: params.get('negative_prompt', ''),
-                steps: params.get('steps', 20), cfg_scale: params.get('cfg_scale', 7.0),
-                width: params.get('width', 512), height: params.get('height', 512),
-                sampler: params.get('sampler_name', 'Euler a')
-            }
-
-        def save_preset(prompts, neg, steps_val, cfg, w, h, samp):
-            preset = {'prompt': prompts, 'negative_prompt': neg, 'steps': steps_val, 'cfg_scale': cfg,
-                      'width': w, 'height': h, 'sampler_name': samp}
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json', encoding='utf-8') as f:
-                json.dump(preset, f, indent=4); return f.name
-
-        def load_preset(json_file):
-            if json_file is None: return {}
-            with open(json_file.name, 'r', encoding='utf-8') as f: preset = json.load(f)
-            return {
-                prompts_input: preset.get('prompt', ''), negative_prompt: preset.get('negative_prompt', ''),
-                steps: preset.get('steps', 20), cfg_scale: preset.get('cfg_scale', 7.0),
-                width: preset.get('width', 512), height: preset.get('height', 512),
-                sampler: preset.get('sampler_name', 'Euler a')
-            }
-
+            yield { generate_button: gr.Button.update(interactive=True) }
+            
         # --- UI Layout ---
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.HTML(f"<h3>SD Batch Streamer <span style='font-size:0.8rem;color:grey;'>v{__version__}</span></h3>")
+        with gr.Blocks() as streamer_tab:
+            gr.HTML(f"<h3>XYZ Matrix Proof of Concept <span style='font-size:0.8rem;color:grey;'>v{__version__}</span></h3>")
+            
+            with gr.Accordion("Global Settings", open=True):
                 with gr.Row():
-                    prompts_input = gr.Textbox(label="Prompts (one per line)", lines=8, placeholder="A beautiful cat...", value=default_params['prompt'])
-                    apply_button = ToolButton(value="↙️", tooltip="Apply parameters from prompt box or last generation.")
-                negative_prompt = gr.Textbox(label="Negative Prompt", lines=3, placeholder="ugly, deformed...", value=default_params['negative_prompt'])
+                    sampler_dropdown = gr.Dropdown(label='Sampler', choices=[s.name for s in sd_samplers.all_samplers], value='Euler a')
+                    scheduler_dropdown = gr.Dropdown(label='Scheduler', choices=[s.label for s in shared.sd_schedulers.schedulers], value='Automatic')
                 with gr.Row():
-                    stream_button = gr.Button("Generate and Stream", variant="primary")
-                    interrupt_button = gr.Button("Interrupt", variant="secondary")
-                    skip_button = gr.Button("Skip", variant="secondary")
+                    steps_slider = gr.Slider(minimum=1, maximum=150, step=1, label="Steps", value=20)
+                    cfg_slider = gr.Slider(minimum=1.0, maximum=30.0, step=0.5, label="CFG Scale", value=7.0)
                 with gr.Row():
-                    steps = gr.Slider(minimum=1, maximum=150, step=1, label="Steps", value=default_params['steps'])
-                    cfg_scale = gr.Slider(minimum=1.0, maximum=30.0, step=0.5, label="CFG Scale", value=default_params['cfg_scale'])
-                with gr.Row():
-                    width = gr.Slider(minimum=64, maximum=2048, step=64, label="Width", value=default_params['width'])
-                    height = gr.Slider(minimum=64, maximum=2048, step=64, label="Height", value=default_params['height'])
-                sampler_choices = [s.name for s in sd_samplers.all_samplers]
-                sampler = gr.Dropdown(label='Sampling method', choices=sampler_choices, value=default_params['sampler_name'])
-                with gr.Row():
-                    save_preset_button = gr.Button("Save Preset")
-                    load_preset_button = gr.UploadButton("Load Preset", file_types=['.json'])
-                save_file_output = gr.File(label="Download Preset", visible=False)
-            with gr.Column(scale=3):
-                gr.HTML("<h4>Live Output</h4> <p>Click an image in the gallery to send its settings back to the controls.</p>")
-                output_gallery = gr.Gallery(
-                    label="Live Output", show_label=False, elem_id="sd_batch_stream_gallery",
-                    columns=4, rows=2, object_fit="contain", height="auto"
-                )
+                    width_slider = gr.Slider(minimum=64, maximum=2048, step=64, label="Width", value=512)
+                    height_slider = gr.Slider(minimum=64, maximum=2048, step=64, label="Height", value=512)
+                seed_input = gr.Number(label="Seed", value=-1, precision=0)
 
-        # --- Event Handlers (FIXED) ---
-        all_ui_components = [prompts_input, negative_prompt, steps, cfg_scale, width, height, sampler]
-        
-        stream_button.click(fn=process_and_stream_images, inputs=all_ui_components, outputs=[output_gallery, stream_button])
-        interrupt_button.click(fn=lambda: shared.state.interrupt(), inputs=None, outputs=None)
-        skip_button.click(fn=lambda: shared.state.skip(), inputs=None, outputs=None)
-        
-        # FIX: Removed the 'outputs' argument since the function returns a dictionary.
-        apply_button.click(fn=apply_parameters, inputs=[prompts_input], outputs=None)
-        output_gallery.select(fn=on_gallery_select, inputs=None, outputs=None)
-        load_preset_button.upload(fn=load_preset, inputs=[load_preset_button], outputs=None)
-        
-        # This handler remains correct as it does not return a dictionary.
-        save_preset_button.click(fn=save_preset, inputs=all_ui_components, outputs=[save_file_output])
+            positive_prompt = gr.Textbox(label="Positive Prompt", placeholder="Use {subject} where you want the X-axis value to appear.", value="photo of a {subject}, high quality")
+            negative_prompt = gr.Textbox(label="Negative Prompt", value="low quality, bad anatomy")
 
-        return streamer_tab
+            with gr.Accordion("Matrix Inputs", open=True):
+                x_input = gr.Textbox(label="X Axis (Subject)", placeholder="Use '|' to separate values", value="dog|woman|elephant")
+                y_input = gr.Textbox(label="Y Axis (CFG Scale)", placeholder="Use '|' to separate values", value="3|6|9")
+                z_input = gr.Textbox(label="Z Axis (Sampler)", placeholder="Use '|' to separate values", value="Euler a|DPM++ 2M Karras|DPM2 2M")
+
+            generate_button = gr.Button("Generate XYZ Matrix", variant="primary")
+            html_log = gr.HTML(label="Log")
+
+            with gr.Tabs():
+                with gr.TabItem("Live Individual Images"):
+                    individual_gallery = gr.Gallery(label="Individual Generations", show_label=False, columns=9)
+                with gr.TabItem("X/Y Grids"):
+                    grid_gallery = gr.Gallery(label="X/Y Grids per Z-Value", show_label=False, columns=3)
+                with gr.TabItem("Mega-Grid"):
+                    mega_grid_image = gr.Image(label="Final Mega-Grid", show_label=False)
+
+        # --- Event Handlers ---
+        inputs = [
+            positive_prompt, negative_prompt, sampler_dropdown, scheduler_dropdown, steps_slider, cfg_slider, width_slider, height_slider, seed_input,
+            x_input, y_input, z_input
+        ]
+        outputs = [
+            individual_gallery, grid_gallery, mega_grid_image, html_log, generate_button, cfg_slider, sampler_dropdown
+        ]
+        generate_button.click(fn=run_xyz_matrix, inputs=inputs, outputs=outputs)
+
+    return streamer_tab
 
 def add_new_tab_to_ui():
     new_tab = create_streamer_ui()
-    return [(new_tab, "Batch Streamer", "sd_batch_streamer_tab")]
+    # To avoid conflicts, we can rename the tab or you can have multiple script files.
+    return [(new_tab, "XYZ Matrix POC", "xyz_matrix_poc_tab")]
 
 on_ui_tabs(add_new_tab_to_ui)
