@@ -2,31 +2,33 @@
 # SD Batch Streamer
 #
 # Author: LSDJesus
-# Version: v0.6.0
+# Version: v0.6.1
 #
 # Changelog:
-# v0.6.0: Final Stability Fix. Implemented the strict Gradio dictionary-based output model:
-#         1. The 'outputs' parameter of .click() MUST contain a list of all potential output component objects.
-#         2. The yielded dictionaries MUST use these component objects as their keys.
-#         3. ALL values in the yielded dictionaries MUST be wrapped in gr.Component.update() calls.
-#         This resolves the "Returned component not specified as output" ValueError and other related issues.
-# v0.5.9: (Failed Attempt) Incorrectly applied previous fix.
-# v0.5.8: (Failed Attempt) Incorrectly removed 'outputs' parameter.
+# v0.6.1: Memory Optimization for Grid Assembly.
+#         - Individual generated images are now saved to a temporary directory on disk.
+#         - Grid assembly now loads images from disk, preventing memory crashes.
+# v0.6.0: Final Stability Fix. Implemented strict Gradio dictionary-based output model.
 #
 
 import gradio as gr
 import itertools
 import functools
 from PIL import Image, ImageDraw, ImageFont
+import os
+import shutil
+import tempfile # For creating temporary directories
 from modules import shared, processing, sd_samplers, sd_schedulers
 from modules.script_callbacks import on_ui_tabs
 
 # --- Version Information ---
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # --- Globals to store data between button clicks ---
-last_run_images = []
+# Now stores paths to images on disk, not PIL objects
+last_run_image_paths = []
 last_run_labels = {}
+temp_output_dir = None # To store the path to our temporary directory
 
 # --- Helper Functions ---
 def create_labeled_grid(images, x_labels, y_labels, font_size=30, margin=5):
@@ -57,25 +59,23 @@ def run_xyz_matrix(
     p_prompt, n_prompt, sampler, scheduler, steps, cfg, width, height, seed,
     x_values_str, y_values_str, z_values_str
 ):
-    # Unpack components from the map for easier access
-    html_log = ui_components_map['html_log']
-    generate_button = ui_components_map['generate_button']
-    assemble_button = ui_components_map['assemble_button']
-    individual_gallery = ui_components_map['individual_gallery']
-    grid_gallery = ui_components_map['grid_gallery']
-    mega_grid_image = ui_components_map['mega_grid_image']
-    
-    global last_run_images, last_run_labels
-    last_run_images, last_run_labels = [], {}
+    global last_run_image_paths, last_run_labels, temp_output_dir
+    last_run_image_paths, last_run_labels = [], {}
 
-    # Yield updates using component objects as keys, wrapped in gr.Component.update()
+    # Clean up previous temporary directory if it exists
+    if temp_output_dir and os.path.exists(temp_output_dir):
+        shutil.rmtree(temp_output_dir)
+    
+    # Create a new temporary directory for this run's images
+    temp_output_dir = tempfile.mkdtemp(prefix="sd-matrix-")
+
     yield {
-        html_log: gr.HTML.update(value="Parsing inputs..."),
-        generate_button: gr.Button.update(interactive=False),
-        assemble_button: gr.Button.update(visible=False),
-        individual_gallery: gr.Gallery.update(value=None), # Clear gallery
-        grid_gallery: gr.Gallery.update(value=None), # Clear grids
-        mega_grid_image: gr.Image.update(value=None) # Clear mega grid
+        ui_components_map['html_log']: gr.HTML.update(value="Parsing inputs..."),
+        ui_components_map['generate_button']: gr.Button.update(interactive=False),
+        ui_components_map['assemble_button']: gr.Button.update(visible=False),
+        ui_components_map['individual_gallery']: gr.Gallery.update(value=None), # Clear gallery
+        ui_components_map['grid_gallery']: gr.Gallery.update(value=None), # Clear grids
+        ui_components_map['mega_grid_image']: gr.Image.update(value=None) # Clear mega grid
     }
     
     x_vals = [x.strip() for x in x_values_str.split('|') if x.strip()]
@@ -83,12 +83,12 @@ def run_xyz_matrix(
     z_vals = [z.strip() for z in z_values_str.split('|') if z.strip()]
     total_images = len(x_vals) * len(y_vals) * len(z_vals)
     if total_images == 0:
-        yield { html_log: gr.HTML.update(value="Error: No jobs to run."), generate_button: gr.Button.update(interactive=True) }; return
+        yield { ui_components_map['html_log']: gr.HTML.update(value="Error: No jobs to run."), ui_components_map['generate_button']: gr.Button.update(interactive=True) }; return
     
     job_list = list(itertools.product(z_vals, y_vals, x_vals))
-    all_images = []
+    live_gallery_images = [] # This list holds PIL objects only for the live preview
     
-    yield { html_log: gr.HTML.update(value=f"Starting generation of {total_images} images...") }
+    yield { ui_components_map['html_log']: gr.HTML.update(value=f"Starting generation of {total_images} images...") }
     shared.state.begin(); shared.state.job_count = total_images
     for i, (z_val, y_val, x_val) in enumerate(job_list):
         if shared.state.interrupted: break
@@ -101,26 +101,33 @@ def run_xyz_matrix(
         )
         proc = processing.process_images(p)
         if proc.images:
-            all_images.append(proc.images[0])
-            yield { individual_gallery: gr.Gallery.update(value=all_images), html_log: gr.HTML.update(value=f"Generated image {i+1}/{total_images}") }
+            new_image = proc.images[0]
+            live_gallery_images.append(new_image) # Add to list for live preview
+
+            # --- Save image to disk and store path ---
+            # Use tempfile.NamedTemporaryFile to get a unique path and ensure cleanup on program exit
+            # but we explicitly manage it with shutil.rmtree later.
+            img_filename = os.path.join(temp_output_dir, f"img_{i:03d}.png")
+            new_image.save(img_filename)
+            last_run_image_paths.append(img_filename)
+            
+            yield { ui_components_map['individual_gallery']: gr.Gallery.update(value=live_gallery_images), ui_components_map['html_log']: gr.HTML.update(value=f"Generated image {i+1}/{total_images}") }
     shared.state.end()
 
-    last_run_images = all_images
     last_run_labels = {'x': x_vals, 'y': y_vals, 'z': z_vals}
     
     yield {
-        html_log: gr.HTML.update(value=f"Generation of {len(all_images)} images complete. Ready to assemble grids."),
-        generate_button: gr.Button.update(interactive=True),
-        assemble_button: gr.Button.update(visible=True)
+        ui_components_map['html_log']: gr.HTML.update(value=f"Generation of {len(last_run_image_paths)} images complete. Ready to assemble grids."),
+        ui_components_map['generate_button']: gr.Button.update(interactive=True),
+        ui_components_map['assemble_button']: gr.Button.update(visible=True)
     }
 
 def assemble_grids_from_last_run(ui_components_map):
-    # Unpack components
     html_log = ui_components_map['html_log']
     grid_gallery = ui_components_map['grid_gallery']
     mega_grid_image = ui_components_map['mega_grid_image']
 
-    if not last_run_images or not last_run_labels:
+    if not last_run_image_paths or not last_run_labels:
         yield { html_log: gr.HTML.update(value="No images from a previous run found to assemble.") }; return
 
     x_vals, y_vals, z_vals = last_run_labels['x'], last_run_labels['y'], last_run_labels['z']
@@ -128,11 +135,20 @@ def assemble_grids_from_last_run(ui_components_map):
     yield { html_log: gr.HTML.update(value="Assembling X/Y grids...") }
     grid_images = []
     images_per_grid = len(x_vals) * len(y_vals)
+    
+    # Load images from disk as needed for grid assembly
+    individual_images_for_grids = []
+    for img_path in last_run_image_paths:
+        individual_images_for_grids.append(Image.open(img_path))
+
     for i, z_label in enumerate(z_vals):
-        grid_data = last_run_images[i * images_per_grid:(i + 1) * images_per_grid]
+        grid_data = individual_images_for_grids[i * images_per_grid:(i + 1) * images_per_grid]
         grid = create_labeled_grid(grid_data, x_vals, y_vals)
         if grid: grid_images.append(grid)
     
+    # Clear individual images from memory after grids are made to reduce overall memory
+    del individual_images_for_grids
+
     if len(grid_images) > 1:
         yield { grid_gallery: gr.Gallery.update(value=grid_images), html_log: gr.HTML.update(value="Assembling Mega-Grid...") }
         grid_w, grid_h = grid_images[0].size
@@ -178,7 +194,7 @@ def create_streamer_ui():
             with gr.TabItem("Mega-Grid"):
                 mega_grid_image = gr.Image(label="Final Mega-Grid", show_label=False)
 
-        # --- Event Handlers (FINAL, DEFINITIVE FIX) ---
+        # --- Event Handlers ---
         
         # This dictionary holds references to the UI components.
         # It's passed to the logic functions via functools.partial.
@@ -189,10 +205,8 @@ def create_streamer_ui():
             'individual_gallery': individual_gallery,
             'grid_gallery': grid_gallery,
             'mega_grid_image': mega_grid_image,
-            # Include these as they are sometimes updated in the loop,
-            # even though they are not explicitly outputs in the final UI update list
-            'cfg_slider': cfg_slider,
-            'sampler_dropdown': sampler_dropdown,
+            'cfg_slider': cfg_slider, # Still used for dynamic updating, even if not an output
+            'sampler_dropdown': sampler_dropdown, # Still used for dynamic updating
         }
 
         # Define the values passed from the UI
@@ -203,24 +217,18 @@ def create_streamer_ui():
         
         # Define the explicit list of ALL components that run_xyz_matrix *might update*.
         # This list MUST exactly match the set of keys used in yielded dictionaries.
-        # The order in this list does NOT matter when yielding dictionaries.
         gen_outputs_list = [
             html_log, generate_button, assemble_button, individual_gallery,
-            grid_gallery, mega_grid_image, cfg_slider, sampler_dropdown
+            grid_gallery, mega_grid_image # These outputs are cleared here, and then potentially updated in assemble_grids_from_last_run
         ]
         
-        # The functools.partial creates a new function where the first argument (components map) is pre-filled
         fn_with_components_for_gen = functools.partial(run_xyz_matrix, all_ui_components_map)
-        
-        # The 'outputs' parameter MUST be defined when the function yields dictionaries.
-        # It must contain references to all the components that the function yields updates for.
         generate_button.click(fn=fn_with_components_for_gen, inputs=gen_inputs, outputs=gen_outputs_list)
         
         # Define the components that assemble_grids_from_last_run might update
         asm_outputs_list = [
             html_log, grid_gallery, mega_grid_image
         ]
-        # For the assemble function, pass the same components map
         fn_with_components_for_asm = functools.partial(assemble_grids_from_last_run, all_ui_components_map)
         assemble_button.click(fn=fn_with_components_for_asm, inputs=None, outputs=asm_outputs_list)
 
